@@ -8,6 +8,10 @@ import (
 	"github.com/influx6/faux/metrics"
 )
 
+//*************************************************************************
+// Method Function types
+//*************************************************************************
+
 // ConnHandler defines a function which will process a incoming net.Conn,
 // else if error is returned then the net.Conn is closed.
 type ConnHandler func(Client) error
@@ -20,11 +24,19 @@ type ReaderFunc func(Client) ([]byte, error)
 // data and error.
 type ReaderFromFunc func(Client) ([]byte, net.Addr, error)
 
-// WriteToFunc defines a function type which takes a client and writes out data.
+// WriteToFunc defines a function type which takes a client and returns a writer through which
+// it receives data for a specific net.Addr.
 type WriteToFunc func(Client, net.Addr, int) (io.WriteCloser, error)
 
-// WriteFunc defines a function type which takes a client and writes out data.
+// WriteFunc defines a function type which takes a client, the max size of data to be written
+// and returns a writer through which it receives data for only that specific size.
 type WriteFunc func(Client, int) (io.WriteCloser, error)
+
+// WriteStreamFunc defines a function type which takes a client, a total size of data to written
+// and the max chunk size to split all data written to its writer. This allows us equally use
+// the writer returned to stream large data size whilst ensuring that we still transfer in small
+// sizes with minimal wait.
+type StreamFunc func(Client, string, int, int) (io.WriteCloser, error)
 
 // ClientSiblingsFunc defines a function which returns a list of sibling funcs.
 type ClientSiblingsFunc func(Client) ([]Client, error)
@@ -54,6 +66,7 @@ type ClientStatisticsFunc func(Client) (ClientStatistic, error)
 
 // errors ...
 var (
+	ErrStreamerClosed                = errors.New("data stream writer is closed")
 	ErrNoDataYet                     = errors.New("data is not yet available for reading")
 	ErrNoHostNameInAddr              = errors.New("addr must have hostname")
 	ErrStillConnected                = errors.New("connection still active")
@@ -62,6 +75,7 @@ var (
 	ErrReadFromNotAllowed            = errors.New("reading from a addr not allowed")
 	ErrLiveCheckNotAllowed           = errors.New("live status not allowed or supported")
 	ErrWriteNotAllowed               = errors.New("data writing not allowed")
+	ErrStreamNotAllowed              = errors.New("stream writing not allowed")
 	ErrWriteToAddrNotAllowed         = errors.New("data writing to a addr not allowed")
 	ErrCloseNotAllowed               = errors.New("closing not allowed")
 	ErrBufferExpansionNotAllowed     = errors.New("buffer expansion not allowed")
@@ -72,6 +86,10 @@ var (
 	ErrAddrNotProvided               = errors.New("net.Addr is not provided")
 	ErrClientReconnectionUnavailable = errors.New("client reconnection not available")
 )
+
+//*************************************************************************
+// Network and Client Stats
+//*************************************************************************
 
 // NetworkStatistic defines a struct ment to hold granular information regarding
 // network activities.
@@ -99,6 +117,10 @@ type ClientStatistic struct {
 	Reconnects      int64
 }
 
+//*************************************************************************
+// mnet.Client Method and Implementation
+//*************************************************************************
+
 // Client holds a given information regarding a given network connection.
 type Client struct {
 	ID               string
@@ -108,6 +130,7 @@ type Client struct {
 	RemoteAddrFunc   ClientAddrFunc
 	ReaderFunc       ReaderFunc
 	WriteFunc        WriteFunc
+	StreamFunc       StreamFunc
 	CloseFunc        ClientFunc
 	LiveFunc         ClientFunc
 	FlushFunc        ClientFunc
@@ -254,13 +277,29 @@ func (c Client) Read() ([]byte, error) {
 	return c.ReaderFunc(c)
 }
 
-// Write writes provided data into connection without any deadline.
+// Write returns a writer to writes provided data of specified size into
+// underline connection. The writer returned is useful for streaming a single
+// small to medium scale data within good desired limits. If you have excessive large
+// data which transfer will take massive time, consider using `Client.Streamr`,
+// which allows streaming very large data in chunk size that are then collected and
+// built together on the receiver side.
 func (c Client) Write(toWriteSize int) (io.WriteCloser, error) {
 	if c.WriteFunc == nil {
 		return nil, ErrWriteNotAllowed
 	}
 
 	return c.WriteFunc(c, toWriteSize)
+}
+
+// Stream returns a writer which chunks the incoming data of total size by the specified
+// chunk size, tagging each data with a identity ID which will be used to tag each data chunk
+// these allows us to stream very large data over the wire by reusing small memory for all writes.
+func (c Client) Stream(streamId string, totalWriteSize int, chunkSize int) (io.WriteCloser, error) {
+	if c.StreamFunc == nil {
+		return nil, ErrStreamNotAllowed
+	}
+
+	return c.StreamFunc(c, streamId, totalWriteSize, chunkSize)
 }
 
 // Flush sends all accumulated message within clients buffer into

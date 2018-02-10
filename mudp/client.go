@@ -130,7 +130,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.Metrics = network.metrics
 	c.CloseFunc = network.close
 	c.WriteFunc = network.write
-	c.WriteFunc = network.write
 	c.ReaderFunc = network.read
 	c.FlushFunc = network.flush
 	c.LiveFunc = network.isAlive

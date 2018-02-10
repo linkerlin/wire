@@ -117,7 +117,7 @@ func (nc *netClient) write(mn mnet.Client, size int) (io.WriteCloser, error) {
 		toWrite += mnet.HeaderLength
 
 		if toWrite >= nc.maxWrite {
-			//TODO: Why do we face speed complexity with using deadline here?
+			//TODO: Why do we face heavy performance cost with using deadline here?
 			//conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
 			if err := nc.buffer.Flush(); err != nil {
 				//conn.SetWriteDeadline(time.Time{})
