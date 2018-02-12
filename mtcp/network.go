@@ -494,6 +494,72 @@ func (n *Network) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 	return clients, nil
 }
 
+func (n *Network) addClient(conn net.Conn) {
+	defer atomic.AddInt64(&n.totalOpened, -1)
+	defer atomic.AddInt64(&n.totalClosed, 1)
+
+	uuid := uuid.NewV4().String()
+
+	client := mnet.Client{
+		ID:      uuid,
+		NID:     n.ID,
+		Metrics: n.Metrics,
+	}
+
+	n.Metrics.Emit(
+		metrics.WithID(n.ID),
+		metrics.With("network", n.ID),
+		metrics.With("client_id", uuid),
+		metrics.With("network-addr", n.Addr),
+		metrics.With("serverName", n.ServerName),
+		metrics.Info("New Client Connection"),
+		metrics.With("local_addr", conn.LocalAddr()),
+		metrics.With("remote_addr", conn.RemoteAddr()),
+	)
+
+	cn := new(networkConn)
+	cn.id = uuid
+	cn.nid = n.ID
+	cn.conn = conn
+	cn.metrics = n.Metrics
+	cn.localAddr = conn.LocalAddr()
+	cn.remoteAddr = conn.RemoteAddr()
+	cn.maxWrite = n.MaxWriteSize
+	cn.maxDeadline = n.MaxWriteDeadline
+	cn.maxStreamDeadline = n.MaxStreamStaleness
+	cn.parser = new(internal.TaggedMessages)
+	//cn.streams = internal.NewStreamedMessages(n.MaxStreamStaleness)
+	cn.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
+	cn.sos = newGuardedBuffer(512)
+
+	client.LiveFunc = cn.isLive
+	client.ReaderFunc = cn.read
+	client.WriteFunc = cn.write
+	client.FlushFunc = cn.flush
+	//client.StreamFunc = cn.stream
+	client.CloseFunc = cn.closeConn
+	client.LocalAddrFunc = cn.getLocalAddr
+	client.StatisticFunc = cn.getStatistics
+	client.SiblingsFunc = n.getOtherClients
+	client.RemoteAddrFunc = cn.getRemoteAddr
+
+	cn.worker.Add(1)
+	go cn.readLoop(client)
+
+	n.cu.Lock()
+	n.clients[uuid] = cn
+	n.cu.Unlock()
+
+	atomic.AddInt64(&n.totalClients, 1)
+	if err := n.Handler(client); err != nil {
+		client.Close()
+	}
+
+	n.cu.Lock()
+	delete(n.clients, uuid)
+	n.cu.Unlock()
+}
+
 // runStream runs the process of listening for new connections and
 // creating appropriate client objects which will handle behaviours
 // appropriately.
@@ -548,71 +614,7 @@ func (n *Network) runStream(stream melon.ConnReadWriteCloser) {
 
 		atomic.AddInt64(&n.totalClients, 1)
 		atomic.AddInt64(&n.totalOpened, 1)
-		go func(conn net.Conn) {
-			defer atomic.AddInt64(&n.totalOpened, -1)
-			defer atomic.AddInt64(&n.totalClosed, 1)
-
-			uuid := uuid.NewV4().String()
-
-			client := mnet.Client{
-				ID:      uuid,
-				NID:     n.ID,
-				Metrics: n.Metrics,
-			}
-
-			n.Metrics.Emit(
-				metrics.WithID(n.ID),
-				metrics.With("network", n.ID),
-				metrics.With("client_id", uuid),
-				metrics.With("network-addr", n.Addr),
-				metrics.With("serverName", n.ServerName),
-				metrics.Info("New Client Connection"),
-				metrics.With("local_addr", conn.LocalAddr()),
-				metrics.With("remote_addr", conn.RemoteAddr()),
-			)
-
-			cn := new(networkConn)
-			cn.id = uuid
-			cn.nid = n.ID
-			cn.conn = conn
-			cn.metrics = n.Metrics
-			cn.localAddr = conn.LocalAddr()
-			cn.remoteAddr = conn.RemoteAddr()
-			cn.maxWrite = n.MaxWriteSize
-			cn.maxDeadline = n.MaxWriteDeadline
-			cn.maxStreamDeadline = n.MaxStreamStaleness
-			cn.parser = new(internal.TaggedMessages)
-			//cn.streams = internal.NewStreamedMessages(n.MaxStreamStaleness)
-			cn.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
-			cn.sos = newGuardedBuffer(512)
-
-			client.LiveFunc = cn.isLive
-			client.ReaderFunc = cn.read
-			client.WriteFunc = cn.write
-			client.FlushFunc = cn.flush
-			//client.StreamFunc = cn.stream
-			client.CloseFunc = cn.closeConn
-			client.LocalAddrFunc = cn.getLocalAddr
-			client.StatisticFunc = cn.getStatistics
-			client.SiblingsFunc = n.getOtherClients
-			client.RemoteAddrFunc = cn.getRemoteAddr
-
-			cn.worker.Add(1)
-			go cn.readLoop(client)
-
-			n.cu.Lock()
-			n.clients[uuid] = cn
-			n.cu.Unlock()
-
-			atomic.AddInt64(&n.totalClients, 1)
-			if err := n.Handler(client); err != nil {
-				client.Close()
-			}
-
-			n.cu.Lock()
-			delete(n.clients, uuid)
-			n.cu.Unlock()
-		}(newConn)
+		go n.addClient(newConn)
 	}
 }
 
