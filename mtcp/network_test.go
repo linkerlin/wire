@@ -75,6 +75,7 @@ func TestNonTLSNetworkWithNetConn(t *testing.T) {
 
 	netw.Wait()
 }
+
 func TestTLSNetworkWithNetConn(t *testing.T) {
 	initMetrics()
 
@@ -251,6 +252,61 @@ func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mt
 			case "sub":
 				res := []byte(fmt.Sprintf("subscribed to %+s\r\n", rest))
 				w, err := client.Write(len(res))
+				if err != nil {
+					return err
+				}
+
+				w.Write(res)
+				w.Close()
+			}
+
+			if err := client.Flush(); err != nil {
+				if err == io.ErrShortWrite {
+					continue
+				}
+
+				return err
+			}
+		}
+	}
+
+	return &netw, netw.Start(ctx)
+}
+
+func createMulticastNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.Network, error) {
+	var netw mtcp.Network
+	netw.Addr = addr
+	netw.Metrics = events
+	netw.TLS = config
+	netw.MaxWriteDeadline = 1 * time.Second
+
+	netw.Handler = func(client mnet.Client) error {
+		for {
+			message, err := client.Read()
+			if err != nil {
+				if err == mnet.ErrNoDataYet {
+					time.Sleep(300 * time.Millisecond)
+					continue
+				}
+
+				return err
+			}
+
+			messages := strings.Split(string(message), " ")
+			if len(messages) == 0 {
+				continue
+			}
+
+			rest := messages[1:]
+
+			others, err := client.Others()
+			if err != nil {
+				return err
+			}
+
+			res := []byte(fmt.Sprintf("now publishing to %+s\r\n", rest))
+			for _, cl := range others {
+				w, err := cl.Write(len(res))
 				if err != nil {
 					return err
 				}

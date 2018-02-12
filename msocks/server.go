@@ -429,7 +429,39 @@ func (n *Network) Start(ctx context.Context) error {
 	return nil
 }
 
-func (n *Network) addClient(ctx context.Context, conn net.Conn, hs ws.Handshake) {
+// AddClient adds a new websocket client through the provided
+// net.Conn.
+func (n *Network) AddClient(newConn net.Conn) error {
+	handshake, err := n.Upgrader.Upgrade(newConn)
+	if err != nil {
+		n.Metrics.Send(metrics.Entry{
+			ID:      n.ID,
+			Message: "Failed to upgrade connection",
+			Field: metrics.Field{
+				"err":         err,
+				"remote_addr": newConn.RemoteAddr(),
+				"local_addr":  newConn.LocalAddr(),
+			},
+		})
+
+		return newConn.Close()
+	}
+
+	n.Metrics.Send(metrics.Entry{
+		ID:      n.ID,
+		Message: "Upgraded connection successfully",
+		Field: metrics.Field{
+			"handshake":   handshake,
+			"remote_addr": newConn.RemoteAddr(),
+			"local_addr":  newConn.LocalAddr(),
+		},
+	})
+
+	n.addWSClient(newConn, handshake)
+	return nil
+}
+
+func (n *Network) addWSClient(conn net.Conn, hs ws.Handshake) {
 	atomic.AddInt64(&n.totalClients, 1)
 	atomic.AddInt64(&n.totalOpened, 1)
 
@@ -444,12 +476,12 @@ func (n *Network) addClient(ctx context.Context, conn net.Conn, hs ws.Handshake)
 	client.wsReader = wsReader
 	client.wsWriter = wsWriter
 	client.maxWrite = n.MaxWriteSize
-	client.header = make([]byte, mnet.HeaderLength)
 	client.id = uuid.NewV4().String()
 	client.maxDeadline = n.MaxDeadline
 	client.localAddr = conn.LocalAddr()
 	client.remoteAddr = conn.RemoteAddr()
 	client.parser = new(internal.TaggedMessages)
+	client.header = make([]byte, mnet.HeaderLength)
 
 	defer n.Metrics.Emit(
 		metrics.Message("Network.addClient: add new client"),
@@ -479,13 +511,12 @@ func (n *Network) addClient(ctx context.Context, conn net.Conn, hs ws.Handshake)
 	mclient.ID = client.id
 	mclient.CloseFunc = client.close
 	mclient.WriteFunc = client.write
-	//mclient.StreamFunc = client.stream
 	mclient.ReaderFunc = client.read
 	mclient.FlushFunc = client.flush
 	mclient.LiveFunc = client.isAlive
-	mclient.StatisticFunc = client.getStatistics
 	mclient.LiveFunc = client.isAlive
 	mclient.LocalAddrFunc = client.getLocalAddr
+	mclient.StatisticFunc = client.getStatistics
 	mclient.RemoteAddrFunc = client.getRemoteAddr
 	mclient.SiblingsFunc = func(_ mnet.Client) ([]mnet.Client, error) {
 		return n.getAllClient(client.remoteAddr), nil
@@ -591,33 +622,7 @@ func (n *Network) handleConnections(ctx context.Context, stream melon.ConnReadWr
 			continue
 		}
 
-		handshake, err := n.Upgrader.Upgrade(newConn)
-		if err != nil {
-			n.Metrics.Send(metrics.Entry{
-				ID: n.ID,
-				Field: metrics.Field{
-					"err":         err,
-					"remote_addr": newConn.RemoteAddr(),
-					"local_addr":  newConn.LocalAddr(),
-				},
-				Message: "Failed to upgrade connection",
-			})
-
-			newConn.Close()
-			continue
-		}
-
-		n.Metrics.Send(metrics.Entry{
-			ID: n.ID,
-			Field: metrics.Field{
-				"handshake":   handshake,
-				"remote_addr": newConn.RemoteAddr(),
-				"local_addr":  newConn.LocalAddr(),
-			},
-			Message: "Upgraded connection successfully",
-		})
-
-		n.addClient(ctx, newConn, handshake)
+		n.AddClient(newConn)
 	}
 }
 

@@ -59,6 +59,7 @@ type ClientStatisticsFunc func(Client) (ClientStatistic, error)
 // errors ...
 var (
 	ErrStreamerClosed                = errors.New("data stream writer is closed")
+	ErrClientAlreadyExists           = errors.New("client with id exists")
 	ErrNoDataYet                     = errors.New("data is not yet available for reading")
 	ErrAlreadyClosed                 = errors.New("already closed connection")
 	ErrReadNotAllowed                = errors.New("reading not allowed")

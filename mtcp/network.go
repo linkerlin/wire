@@ -122,14 +122,6 @@ func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
 	return indata, err
 }
 
-//func (nc *networkConn) stream(cm mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
-//	if err := nc.isLive(cm); err != nil {
-//		return nil, err
-//	}
-//
-//	return internal.NewStreamWriter(cm, id, total, chunk), nil
-//}
-
 func (nc *networkConn) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
 	if err := nc.isLive(cm); err != nil {
 		return nil, err
@@ -361,10 +353,6 @@ type Network struct {
 
 // Start initializes the network listener.
 func (n *Network) Start(ctx context.Context) error {
-	if n.ctx != nil {
-		return nil
-	}
-
 	if n.Metrics == nil {
 		n.Metrics = metrics.New()
 	}
@@ -396,7 +384,7 @@ func (n *Network) Start(ctx context.Context) error {
 		return err
 	}
 
-	n.ctx = ctx
+	//n.ctx = ctx
 	n.raddr = stream.Addr()
 	n.pool = make(chan func(), 0)
 	n.clients = make(map[string]*networkConn)
@@ -483,7 +471,6 @@ func (n *Network) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 		client.LiveFunc = conn.isLive
 		client.FlushFunc = conn.flush
 		client.WriteFunc = conn.write
-		//client.StreamFunc = conn.stream
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr
@@ -492,6 +479,13 @@ func (n *Network) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 	}
 
 	return clients, nil
+}
+
+// AddClient adds a new websocket client through the provided
+// net.Conn.
+func (n *Network) AddClient(conn net.Conn) error {
+	go n.addClient(conn)
+	return nil
 }
 
 func (n *Network) addClient(conn net.Conn) {
@@ -528,7 +522,6 @@ func (n *Network) addClient(conn net.Conn) {
 	cn.maxDeadline = n.MaxWriteDeadline
 	cn.maxStreamDeadline = n.MaxStreamStaleness
 	cn.parser = new(internal.TaggedMessages)
-	//cn.streams = internal.NewStreamedMessages(n.MaxStreamStaleness)
 	cn.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
 	cn.sos = newGuardedBuffer(512)
 
@@ -536,7 +529,6 @@ func (n *Network) addClient(conn net.Conn) {
 	client.ReaderFunc = cn.read
 	client.WriteFunc = cn.write
 	client.FlushFunc = cn.flush
-	//client.StreamFunc = cn.stream
 	client.CloseFunc = cn.closeConn
 	client.LocalAddrFunc = cn.getLocalAddr
 	client.StatisticFunc = cn.getStatistics

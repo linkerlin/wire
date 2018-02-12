@@ -392,7 +392,8 @@ func (n *Network) getAllClient(skipAddr net.Addr) []mnet.Client {
 	return clients
 }
 
-func (n *Network) getClient(addr net.Addr, core *net.UDPConn, h mnet.ConnHandler) *netClient {
+// addClient adds a new network connection into the network.
+func (n *Network) addClient(addr net.Addr, core *net.UDPConn, h mnet.ConnHandler) *netClient {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
@@ -479,7 +480,7 @@ func (n *Network) handleConnections(ctx context.Context, core *net.UDPConn) {
 			continue
 		}
 
-		client := n.getClient(addr, core, n.Handler)
+		client := n.addClient(addr, core, n.Handler)
 		if err := client.handleMessage(incoming[:nn]); err != nil {
 			n.Metrics.Send(metrics.Entry{
 				ID:      n.ID,
