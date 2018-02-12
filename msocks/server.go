@@ -74,6 +74,14 @@ func (sc *socketConn) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error)
 	return stats, nil
 }
 
+//func (sc *socketConn) stream(mn mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
+//	if err := sc.isAlive(mn); err != nil {
+//		return nil, err
+//	}
+//
+//	return internal.NewStreamWriter(mn, id, total, chunk), nil
+//}
+
 func (sc *socketConn) write(mn mnet.Client, size int) (io.WriteCloser, error) {
 	if err := sc.isAlive(mn); err != nil {
 		return nil, err
@@ -146,18 +154,13 @@ func (sc *socketConn) isAlive(_ mnet.Client) error {
 }
 
 func (sc *socketConn) read(mn mnet.Client) ([]byte, error) {
-	data, _, err := sc.readFrom(mn)
-	return data, err
-}
-
-func (sc *socketConn) readFrom(mn mnet.Client) ([]byte, net.Addr, error) {
 	if err := sc.isAlive(mn); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	indata, from, err := sc.parser.Next()
+	indata, err := sc.parser.Next()
 	atomic.AddInt64(&sc.totalReadMsgs, 1)
-	return indata, from, err
+	return indata, err
 }
 
 func (sc *socketConn) flush(mn mnet.Client) error {
@@ -293,7 +296,7 @@ func (sc *socketConn) readLoop(conn net.Conn, reader *wsutil.Reader) {
 		})
 
 		// Send into go-routine (critical path)?
-		if err := sc.parser.Parse(incoming[:n], nil); err != nil {
+		if err := sc.parser.Parse(incoming[:n]); err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
@@ -336,10 +339,14 @@ type Network struct {
 	totalOpened  int64
 	started      int64
 
-	// ClientMaxWriteDeadline defines max time before all clients collected writes must be written to the connection.
+	// MaxConnection defines the total allowed connections for
+	// giving network.
+	MaxConnections int
+
+	// MaxWriteDeadline defines max time before all clients collected writes must be written to the connection.
 	MaxDeadline time.Duration
 
-	// ClientMaxWriteSize sets given max size of buffer for client, each client writes collected
+	// MaxWriteSize sets given max size of buffer for client, each client writes collected
 	// till flush must not exceed else will not be buffered and will be written directly.
 	MaxWriteSize int
 
@@ -400,6 +407,10 @@ func (n *Network) Start(ctx context.Context) error {
 	n.raddr = stream.Addr()
 	n.clients = make(map[string]*socketConn)
 
+	if n.MaxConnections <= 0 {
+		n.MaxConnections = mnet.MaxConnections
+	}
+
 	if n.MaxWriteSize <= 0 {
 		n.MaxWriteSize = mnet.MaxBufferSize
 	}
@@ -420,7 +431,6 @@ func (n *Network) Start(ctx context.Context) error {
 
 func (n *Network) addClient(ctx context.Context, conn net.Conn, hs ws.Handshake) {
 	atomic.AddInt64(&n.totalClients, 1)
-	atomic.AddInt64(&n.totalActive, 1)
 	atomic.AddInt64(&n.totalOpened, 1)
 
 	wsReader := wsutil.NewReader(conn, wsState)
@@ -454,7 +464,6 @@ func (n *Network) addClient(ctx context.Context, conn net.Conn, hs ws.Handshake)
 	client.waiter.Add(1)
 	go func() {
 		defer atomic.AddInt64(&n.totalClients, -1)
-		defer atomic.AddInt64(&n.totalActive, -1)
 		defer atomic.AddInt64(&n.totalClosed, 1)
 
 		client.readLoop(conn, wsReader)
@@ -470,6 +479,7 @@ func (n *Network) addClient(ctx context.Context, conn net.Conn, hs ws.Handshake)
 	mclient.ID = client.id
 	mclient.CloseFunc = client.close
 	mclient.WriteFunc = client.write
+	//mclient.StreamFunc = client.stream
 	mclient.ReaderFunc = client.read
 	mclient.FlushFunc = client.flush
 	mclient.LiveFunc = client.isAlive
@@ -514,6 +524,7 @@ func (n *Network) getAllClient(addr net.Addr) []mnet.Client {
 		client.ID = conn.id
 		client.Metrics = n.Metrics
 		client.LiveFunc = conn.isAlive
+		//client.StreamFunc = conn.stream
 		client.WriteFunc = conn.write
 		client.FlushFunc = conn.flush
 		client.StatisticFunc = conn.getStatistics
@@ -575,6 +586,11 @@ func (n *Network) handleConnections(ctx context.Context, stream melon.ConnReadWr
 			continue
 		}
 
+		if int(atomic.LoadInt64(&n.totalOpened)) >= n.MaxConnections {
+			newConn.Close()
+			continue
+		}
+
 		handshake, err := n.Upgrader.Upgrade(newConn)
 		if err != nil {
 			n.Metrics.Send(metrics.Entry{
@@ -621,7 +637,6 @@ func (n *Network) Statistics() mnet.NetworkStatistic {
 	stats.RemoteAddr = n.raddr
 	stats.TotalClients = atomic.LoadInt64(&n.totalClients)
 	stats.TotalClosed = atomic.LoadInt64(&n.totalClosed)
-	stats.TotalActive = atomic.LoadInt64(&n.totalActive)
 	stats.TotalOpened = atomic.LoadInt64(&n.totalOpened)
 	return stats
 }

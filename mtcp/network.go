@@ -38,8 +38,9 @@ type networkConn struct {
 	worker     sync.WaitGroup
 	do         sync.Once
 
-	maxWrite    int
-	maxDeadline time.Duration
+	maxWrite          int
+	maxDeadline       time.Duration
+	maxStreamDeadline time.Duration
 
 	totalRead      int64
 	totalWritten   int64
@@ -50,6 +51,7 @@ type networkConn struct {
 
 	sos    *guardedBuffer
 	parser *internal.TaggedMessages
+	//streams *internal.StreamedMessages
 
 	mu   sync.RWMutex
 	conn net.Conn
@@ -115,10 +117,18 @@ func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
 		return nil, err
 	}
 
-	indata, _, err := nc.parser.Next()
+	indata, err := nc.parser.Next()
 	atomic.AddInt64(&nc.totalReadMsgs, 1)
 	return indata, err
 }
+
+//func (nc *networkConn) stream(cm mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
+//	if err := nc.isLive(cm); err != nil {
+//		return nil, err
+//	}
+//
+//	return internal.NewStreamWriter(cm, id, total, chunk), nil
+//}
 
 func (nc *networkConn) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
 	if err := nc.isLive(cm); err != nil {
@@ -278,7 +288,7 @@ func (nc *networkConn) readLoop(cm mnet.Client) {
 		}
 
 		// Send into go-routine (critical path)?
-		if err := nc.parser.Parse(incoming[:n], nil); err != nil {
+		if err := nc.parser.Parse(incoming[:n]); err != nil {
 			nc.sos.Do(func(bu *bytes.Buffer) {
 				bu.WriteString("-ERR ")
 				bu.WriteString(err.Error())
@@ -326,12 +336,20 @@ type Network struct {
 	totalActive  int64
 	totalOpened  int64
 
-	// ClientMaxWriteDeadline defines max time before all clients collected writes must be written to the connection.
-	ClientMaxWriteDeadline time.Duration
+	// MaxConnection defines the total allowed connections for
+	// giving network.
+	MaxConnections int
 
-	// ClientMaxWriteSize sets given max size of buffer for client, each client writes collected
+	// MaxStreamStaleness defines the maximum duration allowed for a
+	// giving stream from being stale.
+	MaxStreamStaleness time.Duration
+
+	// MaxWriteDeadline defines max time before all clients collected writes must be written to the connection.
+	MaxWriteDeadline time.Duration
+
+	// MaxWriteSize sets given max size of buffer for client, each client writes collected
 	// till flush must not exceed else will not be buffered and will be written directly.
-	ClientMaxWriteSize int
+	MaxWriteSize int
 
 	raddr    net.Addr
 	pool     chan func()
@@ -383,12 +401,20 @@ func (n *Network) Start(ctx context.Context) error {
 	n.pool = make(chan func(), 0)
 	n.clients = make(map[string]*networkConn)
 
-	if n.ClientMaxWriteSize <= 0 {
-		n.ClientMaxWriteSize = mnet.MaxBufferSize
+	if n.MaxWriteSize <= 0 {
+		n.MaxWriteSize = mnet.MaxBufferSize
 	}
 
-	if n.ClientMaxWriteDeadline <= 0 {
-		n.ClientMaxWriteDeadline = mnet.MaxFlushDeadline
+	if n.MaxConnections <= 0 {
+		n.MaxConnections = mnet.MaxConnections
+	}
+
+	if n.MaxStreamStaleness <= 0 {
+		n.MaxStreamStaleness = mnet.MaxStreamStaleness
+	}
+
+	if n.MaxWriteDeadline <= 0 {
+		n.MaxWriteDeadline = mnet.MaxFlushDeadline
 	}
 
 	n.routines.Add(2)
@@ -431,7 +457,6 @@ func (n *Network) Statistics() mnet.NetworkStatistic {
 	stats.RemoteAddr = n.raddr
 	stats.TotalClients = atomic.LoadInt64(&n.totalClients)
 	stats.TotalClosed = atomic.LoadInt64(&n.totalClosed)
-	stats.TotalActive = atomic.LoadInt64(&n.totalActive)
 	stats.TotalOpened = atomic.LoadInt64(&n.totalOpened)
 	return stats
 }
@@ -456,8 +481,9 @@ func (n *Network) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 		client.ID = conn.id
 		client.Metrics = n.Metrics
 		client.LiveFunc = conn.isLive
-		client.WriteFunc = conn.write
 		client.FlushFunc = conn.flush
+		client.WriteFunc = conn.write
+		//client.StreamFunc = conn.stream
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr
@@ -514,11 +540,15 @@ func (n *Network) runStream(stream melon.ConnReadWriteCloser) {
 			continue
 		}
 
+		// if we have maximum allowed connections, then close new conn.
+		if int(atomic.LoadInt64(&n.totalOpened)) >= n.MaxConnections {
+			newConn.Close()
+			continue
+		}
+
 		atomic.AddInt64(&n.totalClients, 1)
-		atomic.AddInt64(&n.totalActive, 1)
 		atomic.AddInt64(&n.totalOpened, 1)
 		go func(conn net.Conn) {
-			defer atomic.AddInt64(&n.totalActive, -1)
 			defer atomic.AddInt64(&n.totalOpened, -1)
 			defer atomic.AddInt64(&n.totalClosed, 1)
 
@@ -546,18 +576,21 @@ func (n *Network) runStream(stream melon.ConnReadWriteCloser) {
 			cn.nid = n.ID
 			cn.conn = conn
 			cn.metrics = n.Metrics
-			cn.parser = new(internal.TaggedMessages)
 			cn.localAddr = conn.LocalAddr()
 			cn.remoteAddr = conn.RemoteAddr()
-			cn.maxWrite = n.ClientMaxWriteSize
-			cn.maxDeadline = n.ClientMaxWriteDeadline
-			cn.buffWriter = bufio.NewWriterSize(conn, n.ClientMaxWriteSize)
+			cn.maxWrite = n.MaxWriteSize
+			cn.maxDeadline = n.MaxWriteDeadline
+			cn.maxStreamDeadline = n.MaxStreamStaleness
+			cn.parser = new(internal.TaggedMessages)
+			//cn.streams = internal.NewStreamedMessages(n.MaxStreamStaleness)
+			cn.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
 			cn.sos = newGuardedBuffer(512)
 
 			client.LiveFunc = cn.isLive
 			client.ReaderFunc = cn.read
 			client.WriteFunc = cn.write
 			client.FlushFunc = cn.flush
+			//client.StreamFunc = cn.stream
 			client.CloseFunc = cn.closeConn
 			client.LocalAddrFunc = cn.getLocalAddr
 			client.StatisticFunc = cn.getStatistics

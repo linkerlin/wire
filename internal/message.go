@@ -1,11 +1,14 @@
 package internal
 
 import (
+	"bytes"
 	"errors"
-	"net"
 	"sync"
+	"time"
 
 	"encoding/binary"
+
+	"strconv"
 
 	"github.com/influx6/faux/pools/seeker"
 	"github.com/influx6/mnet"
@@ -18,20 +21,227 @@ const (
 
 // errors ...
 var (
-	ErrInvalidHeader = errors.New("invalid header data: max data size 4294967295")
-	ErrHeaderLength  = errors.New("invalid data, expected length of 4 for header size")
+	ErrTotalExceeded   = errors.New("specified data size exceeded, rejecting write")
+	ErrLimitExceeded   = errors.New("writer space exceeded")
+	ErrNotStream       = errors.New("data is not a stream transmission")
+	ErrStreamDataParts = errors.New("invalid stream data, expected 2 part pieces")
+	ErrInvalidHeader   = errors.New("invalid header data: max data size 4294967295")
+	ErrHeaderLength    = errors.New("invalid data, expected length of 4 for header size")
 )
 
 var (
 	messagePool = sync.Pool{New: func() interface{} { return new(messageTomb) }}
 )
 
+// Streamed embodies data related to a Streamed contents.
+type Streamed struct {
+	Meta      mnet.Meta
+	ts        time.Time
+	data      []byte
+	completed bool
+	written   int
+	total     int
+	available int
+}
+
+// StreamedMessages implements the parsing of Streamed messages which
+// are split into different sets, and will collected all messages,
+// till each it reached it's end state which then moves it to a set of
+// finished products.
+type StreamedMessages struct {
+	keepfailed bool
+	expr       time.Duration
+	sl         sync.Mutex
+	failed     map[string]*Streamed
+	streams    map[string]*Streamed
+	rl         sync.Mutex
+	ready      []string
+}
+
+// NewStreamedMessages returns a new instance of StreamedMessages. It uses the provided
+// expiration duration to spun a period check of all Streamed and incomplete data Streamed
+// being cached, which then gets removed.
+func NewStreamedMessages(expiration time.Duration, keepfailed bool) *StreamedMessages {
+	return &StreamedMessages{
+		keepfailed: keepfailed,
+		expr:       expiration,
+		streams:    make(map[string]*Streamed),
+	}
+}
+
+// Next returns the next complete message stream which has being
+// parsed from the underline message queue.
+func (smp *StreamedMessages) Next() ([]byte, mnet.Meta, error) {
+	var meta mnet.Meta
+	var next string
+
+	smp.rl.Lock()
+	readyTotal := len(smp.ready)
+	if readyTotal == 0 {
+		smp.rl.Unlock()
+
+		// Remove all aged streams.
+		smp.removeAged()
+		return nil, meta, mnet.ErrNoDataYet
+	}
+
+	next = smp.ready[0]
+	if readyTotal > 1 {
+		smp.ready = smp.ready[1:]
+	} else {
+		smp.ready = smp.ready[:0]
+	}
+	smp.rl.Unlock()
+
+	smp.sl.Lock()
+	item := smp.streams[next]
+	delete(smp.streams, next)
+	smp.sl.Unlock()
+
+	// Remove all aged streams.
+	smp.removeAged()
+
+	return item.data, item.Meta, nil
+}
+
+// FailedStreams returns a map of all streams whoes data failed completion.
+// This function is a one-time call, and the returned streamed map reference
+// removed from the StreamedMessage.
+func (smp *StreamedMessages) FailedStreams() map[string]*Streamed {
+	smp.sl.Lock()
+	defer smp.sl.Unlock()
+
+	failed := smp.failed
+	smp.failed = make(map[string]*Streamed)
+	return failed
+}
+
+func (smp *StreamedMessages) removeAged() {
+	smp.sl.Lock()
+	defer smp.sl.Unlock()
+
+	now := time.Now()
+
+	// check every stream for aged/staled Streamed whoes last update
+	// time has surpassed the expiration duration allowed.
+	for id, stream := range smp.streams {
+		if stream.ts.Sub(now) <= smp.expr || stream.completed {
+			continue
+		}
+
+		stream.data = stream.data[:0]
+		if smp.keepfailed {
+			smp.failed[id] = stream
+		}
+
+		delete(smp.streams, id)
+	}
+}
+
+var (
+	ctrl        = []byte("\r\n")
+	colon       = []byte(":")
+	beginHeader = []byte(STRMHeader)
+	endHeader   = []byte(STRMEndHeader)
+)
+
+// Parse implements the necessary procedure for parsing incoming data and
+// appropriately splitting them accordingly to their respective parts.
+func (smp *StreamedMessages) Parse(d []byte) error {
+	if !bytes.HasPrefix(d, beginHeader) && !bytes.HasPrefix(d, endHeader) {
+		return ErrNotStream
+	}
+
+	parts := bytes.SplitN(d, ctrl, 2)
+	if len(parts) != 2 {
+		return ErrStreamDataParts
+	}
+
+	header, data := parts[0], parts[1]
+	headerParts := bytes.Split(header, colon)
+	if len(headerParts) == 0 || (len(headerParts) != 4 && len(headerParts) != 6) {
+		return ErrStreamDataParts
+	}
+
+	var id string
+	var err error
+	var total, chunk, offset, endOffset int64
+
+	if total, err = strconv.ParseInt(string(headerParts[2]), 10, 64); err != nil {
+		return err
+	}
+
+	var ok bool
+	var isNew bool
+	var stream *Streamed
+
+	id = string(headerParts[1])
+	smp.sl.Lock()
+	if stream, ok = smp.streams[id]; !ok {
+		isNew = true
+		stream = new(Streamed)
+		stream.total = int(total)
+		stream.data = make([]byte, 0, stream.total)
+		stream.data = stream.data[:stream.total]
+	}
+	smp.sl.Unlock()
+
+	stream.ts = time.Now()
+
+	if len(data) != 0 {
+		stream.written += copy(stream.data[stream.written:stream.total], data)
+	}
+
+	// First convert header data so we can appropriately get necessary stream facts.
+	headerType := string(headerParts[0])
+	switch headerType {
+	case STRMHeader:
+		if chunk, err = strconv.ParseInt(string(headerParts[3]), 10, 64); err != nil {
+			return err
+		}
+
+		if offset, err = strconv.ParseInt(string(headerParts[4]), 10, 64); err != nil {
+			return err
+		}
+
+		if endOffset, err = strconv.ParseInt(string(headerParts[5]), 10, 64); err != nil {
+			return err
+		}
+
+		if isNew {
+			stream.Meta.Id = id
+			//stream.Meta.IsStream = true
+			stream.Meta.Total = total
+			stream.Meta.Chunk = chunk
+		}
+
+		stream.Meta.Parts = append(stream.Meta.Parts, mnet.Part{Begin: offset, End: endOffset})
+
+	case STRMEndHeader:
+		if offset, err = strconv.ParseInt(string(headerParts[3]), 10, 64); err != nil {
+			return err
+		}
+
+		smp.rl.Lock()
+		smp.ready = append(smp.ready, id)
+		smp.rl.Unlock()
+
+		stream.completed = true
+		stream.Meta.Parts = append(stream.Meta.Parts, mnet.Part{Begin: offset, End: offset})
+	}
+
+	smp.sl.Lock()
+	smp.streams[id] = stream
+	smp.sl.Unlock()
+
+	return nil
+}
+
 // messageTomb defines a single node upon a linked list which
 // contains it's data and a link to the next messageTomb node.
 type messageTomb struct {
-	Next   *messageTomb
-	Target net.Addr
-	Data   []byte
+	Next *messageTomb
+	Data []byte
 }
 
 // TaggedMessages implements a parser which parses incoming messages
@@ -48,7 +258,7 @@ type TaggedMessages struct {
 
 // Parse implements the necessary procedure for parsing incoming data and
 // appropriately splitting them accordingly to their respective parts.
-func (smp *TaggedMessages) Parse(d []byte, from net.Addr) error {
+func (smp *TaggedMessages) Parse(d []byte) error {
 	if smp.scratch == nil {
 		smp.scratch = seeker.NewBufferedPeeker(nil)
 	}
@@ -82,7 +292,6 @@ func (smp *TaggedMessages) Parse(d []byte, from net.Addr) error {
 		n := copy(nextCopy, next)
 
 		msg := messagePool.New().(*messageTomb)
-		msg.Target = from
 		msg.Data = nextCopy[:n]
 		smp.addMessage(msg)
 	}
@@ -91,11 +300,11 @@ func (smp *TaggedMessages) Parse(d []byte, from net.Addr) error {
 }
 
 // Next returns the next message saved on the parsers linked list.
-func (smp *TaggedMessages) Next() ([]byte, net.Addr, error) {
+func (smp *TaggedMessages) Next() ([]byte, error) {
 	smp.mu.RLock()
 	if smp.tail == nil && smp.head == nil {
 		smp.mu.RUnlock()
-		return nil, nil, mnet.ErrNoDataYet
+		return nil, mnet.ErrNoDataYet
 	}
 
 	head := smp.head
@@ -109,15 +318,13 @@ func (smp *TaggedMessages) Next() ([]byte, net.Addr, error) {
 	}
 
 	data := head.Data
-	target := head.Target
 
-	head.Target = nil
 	head.Data = nil
 	smp.mu.RUnlock()
 
 	messagePool.Put(head)
 
-	return data, target, nil
+	return data, nil
 }
 
 func (smp *TaggedMessages) addMessage(m *messageTomb) {
@@ -135,101 +342,6 @@ func (smp *TaggedMessages) addMessage(m *messageTomb) {
 	smp.mu.Unlock()
 }
 
-//// MessageDivision implements a parser which parses incoming messages
-//// as a series of [MessageSizeLength][Message] joined together, which it
-//// splits apart into individual messageTomb blocks. The parser keeps a series of internal
-//// linked list which contains already processed messageTomb, which has a endless length
-//// value which allows appending new messages as they arrive.
-//type MessageDivision struct {
-//	division io.WriteCloser
-//	mu       sync.RWMutex
-//	head     *messageTomb
-//	tail     *messageTomb
-//	total    int64
-//}
-//
-//// Parse implements the necessary procedure for parsing incoming data and
-//// appropriately splitting them accordingly to their respective parts.
-//func (md *MessageDivision) Parse(d []byte) error {
-//	if md.division == nil {
-//
-//		// if first data coming in, is not a uint16 header, then respond
-//		// with error.
-//		if len(d) != HeaderLength {
-//			return ErrHeaderLength
-//		}
-//
-//		incoming := binary.BigEndian.Uint32(d)
-//		if incoming > MaxHeaderSize {
-//			return ErrInvalidHeader
-//		}
-//
-//		md.division = bufferPool.Get(int(incoming), func(rec int, w io.WriterTo) error {
-//			bu := bytes.NewBuffer(make([]byte, 0, rec))
-//			if _, err := w.WriteTo(bu); err != nil {
-//				return err
-//			}
-//
-//			msg := messagePool.New().(*messageTomb)
-//			msg.Data = bu.Bytes()
-//			md.addMessage(msg)
-//
-//			bu.Reset()
-//			return nil
-//		})
-//	}
-//
-//	if _, err := md.division.Write(d); err != nil {
-//		if err != done.ErrLimitExceeded {
-//			return err
-//		}
-//
-//		md.division.Close()
-//		md.division = nil
-//	}
-//
-//	return nil
-//}
-//
-//// Next returns the next messageTomb saved on the parsers linked list.
-//func (md *MessageDivision) Next() ([]byte, error) {
-//	md.mu.RLock()
-//
-//	if md.tail == nil && md.head == nil {
-//		md.mu.RUnlock()
-//		return nil, ErrNoDataYet
-//	}
-//
-//	head := md.head
-//	if md.tail == head {
-//		md.tail = nil
-//		md.head = nil
-//	} else {
-//		next := head.Next
-//		head.Next = nil
-//		md.head = next
-//	}
-//
-//	data := head.Data
-//
-//	head.Data = nil
-//	md.mu.RUnlock()
-//
-//	messagePool.Put(head)
-//
-//	return data, nil
-//}
-//
-//func (md *MessageDivision) addMessage(m *messageTomb) {
-//	md.mu.Lock()
-//	if md.head == nil && md.tail == nil {
-//		md.head = m
-//		md.tail = m
-//		md.mu.Unlock()
-//		return
-//	}
-//
-//	md.tail.Next = m
-//	md.tail = m
-//	md.mu.Unlock()
-//}
+//***************************************************************
+// Custom functions
+//***************************************************************

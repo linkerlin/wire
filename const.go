@@ -31,6 +31,14 @@ const (
 	// during no-use. It is used by net.Dialer.
 	DefaultKeepAlive = 3 * time.Minute
 
+	// MaxStreamStaleness sets the default maximum time for stream staleness, where if
+	// giving stream has not received any new data, then collected values will be freed
+	// and relocated back to free memory.
+	MaxStreamStaleness = 10 * time.Minute
+
+	// MaxConnections sets a default maximum connection allowed for a giving network.
+	MaxConnections = 8000
+
 	// DefaultReconnectBufferSize sets the size of the buffer during reconnection.
 	DefaultReconnectBufferSize = 1024 * 1024 * 8
 

@@ -20,7 +20,7 @@ import (
 )
 
 // ConnectOptions defines a function type used to apply given
-// changes to a *clientNetwork type
+// changes to a *clientNetwork type.
 type ConnectOptions func(*clientNetwork)
 
 // TLSConfig sets the giving tls.Config to be used by the returned
@@ -41,7 +41,7 @@ func SecureConnection() ConnectOptions {
 }
 
 // WriteInterval sets the clientNetwork to use the provided value
-// as its write intervals for colasced/batch writing of send data.
+// as its write intervals for coalesced/batch writing of send data.
 func WriteInterval(dur time.Duration) ConnectOptions {
 	return func(cm *clientNetwork) {
 		cm.clientMaxWriteDeadline = dur
@@ -77,6 +77,13 @@ func KeepAliveTimeout(dur time.Duration) ConnectOptions {
 func DialTimeout(dur time.Duration) ConnectOptions {
 	return func(cm *clientNetwork) {
 		cm.dialTimeout = dur
+	}
+}
+
+// StreamStaleness sets the maximum stream staleness allowed for streamed data.
+func StreamStaleness(dur time.Duration) ConnectOptions {
+	return func(cm *clientNetwork) {
+		cm.streamStaleness = dur
 	}
 }
 
@@ -116,6 +123,10 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.metrics = metrics.New()
 	}
 
+	if network.streamStaleness <= 0 {
+		network.streamStaleness = mnet.MaxStreamStaleness
+	}
+
 	if network.dialTimeout <= 0 {
 		network.dialTimeout = mnet.DefaultDialTimeout
 	}
@@ -142,6 +153,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	network.id = c.ID
 	network.addr = addr
 	network.parser = new(internal.TaggedMessages)
+	//network.streams = internal.NewStreamedMessages(network.streamStaleness)
 	//network.scratch = bytes.NewBuffer(make([]byte, 0, mnet.DefaultReconnectBufferSize))
 	network.buffWriter = bufio.NewWriterSize(network.scratch, network.clientMaxWriteSize)
 
@@ -150,6 +162,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.FlushFunc = network.flush
 	c.ReaderFunc = network.read
 	c.WriteFunc = network.write
+	//c.StreamFunc = network.stream
 	c.CloseFunc = network.close
 	c.LocalAddrFunc = network.getLocalAddr
 	c.RemoteAddrFunc = network.getRemoteAddr
@@ -177,9 +190,11 @@ type clientNetwork struct {
 	keepAliveTimeout time.Duration
 
 	clientMaxWriteSize     int
+	streamStaleness        time.Duration
 	clientMaxWriteDeadline time.Duration
 
 	parser     *internal.TaggedMessages
+	streams    *internal.StreamedMessages
 	scratch    *bytes.Buffer
 	bu         sync.Mutex
 	buffWriter *bufio.Writer
@@ -274,6 +289,14 @@ func (cn *clientNetwork) flush(cm mnet.Client) error {
 	return err
 }
 
+//func (cn *clientNetwork) stream(cm mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
+//	if err := cn.isLive(cm); err != nil {
+//		return nil, err
+//	}
+//
+//	return internal.NewStreamWriter(cm, id, total, chunk), nil
+//}
+
 func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
 	if err := cn.isLive(cm); err != nil {
 		return nil, err
@@ -330,7 +353,7 @@ func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
 		return nil, err
 	}
 
-	indata, _, err := cn.parser.Next()
+	indata, err := cn.parser.Next()
 	atomic.AddInt64(&cn.totalRead, int64(len(indata)))
 	return indata, err
 }
@@ -358,7 +381,7 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 		}
 
 		// if we fail to parse the data then we error out.
-		if err := cn.parser.Parse(incoming[:n], nil); err != nil {
+		if err := cn.parser.Parse(incoming[:n]); err != nil {
 			return
 		}
 

@@ -20,14 +20,6 @@ type ConnHandler func(Client) error
 // data and error.
 type ReaderFunc func(Client) ([]byte, error)
 
-// ReaderFromFunc defines a function which takes giving incoming Client and returns associated
-// data and error.
-type ReaderFromFunc func(Client) ([]byte, net.Addr, error)
-
-// WriteToFunc defines a function type which takes a client and returns a writer through which
-// it receives data for a specific net.Addr.
-type WriteToFunc func(Client, net.Addr, int) (io.WriteCloser, error)
-
 // WriteFunc defines a function type which takes a client, the max size of data to be written
 // and returns a writer through which it receives data for only that specific size.
 type WriteFunc func(Client, int) (io.WriteCloser, error)
@@ -68,19 +60,19 @@ type ClientStatisticsFunc func(Client) (ClientStatistic, error)
 var (
 	ErrStreamerClosed                = errors.New("data stream writer is closed")
 	ErrNoDataYet                     = errors.New("data is not yet available for reading")
-	ErrNoHostNameInAddr              = errors.New("addr must have hostname")
-	ErrStillConnected                = errors.New("connection still active")
 	ErrAlreadyClosed                 = errors.New("already closed connection")
 	ErrReadNotAllowed                = errors.New("reading not allowed")
-	ErrReadFromNotAllowed            = errors.New("reading from a addr not allowed")
 	ErrLiveCheckNotAllowed           = errors.New("live status not allowed or supported")
 	ErrWriteNotAllowed               = errors.New("data writing not allowed")
 	ErrStreamNotAllowed              = errors.New("stream writing not allowed")
+	ErrNoHostNameInAddr              = errors.New("addr must have hostname")
+	ErrStillConnected                = errors.New("connection still active")
+	ErrReadFromNotAllowed            = errors.New("reading from a addr not allowed")
 	ErrWriteToAddrNotAllowed         = errors.New("data writing to a addr not allowed")
-	ErrCloseNotAllowed               = errors.New("closing not allowed")
-	ErrBufferExpansionNotAllowed     = errors.New("buffer expansion not allowed")
-	ErrFlushNotAllowed               = errors.New("write flushing not allowed")
 	ErrFlushToAddrNotAllowed         = errors.New("write flushing to target addr not allowed")
+	ErrBufferExpansionNotAllowed     = errors.New("buffer expansion not allowed")
+	ErrCloseNotAllowed               = errors.New("closing not allowed")
+	ErrFlushNotAllowed               = errors.New("write flushing not allowed")
 	ErrSiblingsNotAllowed            = errors.New("siblings retrieval not allowed")
 	ErrStatisticsNotProvided         = errors.New("statistics not provided")
 	ErrAddrNotProvided               = errors.New("net.Addr is not provided")
@@ -88,11 +80,39 @@ var (
 )
 
 //*************************************************************************
+// Stream Type and Interface
+//*************************************************************************
+
+// Part embodies  offset information for a giving data stream.
+type Part struct {
+	Begin int64
+	End   int64
+}
+
+// Meta embodies meta data used to contain data related to
+// a stream.
+type Meta struct {
+	Chunk int64
+	Total int64
+	Id    string
+	Parts []Part
+}
+
+// StreamReader defines an interface type which exposes a read method
+// that returns a data with associated meta information if it was
+// streamed as collective chunks over the wire, else returning
+// an error if any occured or ErrNoDataYet, if no data is
+// currently available.
+type StreamReader interface {
+	Read() ([]byte, *Meta, error)
+}
+
+//*************************************************************************
 // Network and Client Stats
 //*************************************************************************
 
 // NetworkStatistic defines a struct ment to hold granular information regarding
-// network activities.
+// server network activities.
 type NetworkStatistic struct {
 	ID           string
 	LocalAddr    net.Addr
@@ -100,11 +120,10 @@ type NetworkStatistic struct {
 	TotalClients int64
 	TotalClosed  int64
 	TotalOpened  int64
-	TotalActive  int64
 }
 
-// ClientStatistic defines a struct ment to hold granular information regarding
-// network activities.
+// ClientStatistic defines a struct meant to hold granular information regarding
+// client network activities.
 type ClientStatistic struct {
 	ID              string
 	Local           net.Addr
@@ -130,7 +149,6 @@ type Client struct {
 	RemoteAddrFunc   ClientAddrFunc
 	ReaderFunc       ReaderFunc
 	WriteFunc        WriteFunc
-	StreamFunc       StreamFunc
 	CloseFunc        ClientFunc
 	LiveFunc         ClientFunc
 	FlushFunc        ClientFunc
@@ -138,8 +156,7 @@ type Client struct {
 	SiblingsFunc     ClientSiblingsFunc
 	StatisticFunc    ClientStatisticsFunc
 	ReconnectionFunc ClientReconnectionFunc
-	//ReaderFromFunc   ReaderFromFunc
-	//WriteToFunc      WriteToFunc
+	//StreamFunc       StreamFunc
 }
 
 // LocalAddr returns local address associated with given client.
@@ -247,28 +264,16 @@ func (c Client) Reconnect(altAddr string) error {
 	return nil
 }
 
-// ReadFrom reads the underline data into the provided connection
-// returning senders address and data.
-// NOTE: Not all may implement this has it's optional.
-//func (c Client) ReadFrom() ([]byte, net.Addr, error) {
-//	if c.ReaderFromFunc == nil {
-//		return nil, nil, ErrReadFromNotAllowed
-//	}
-//
-//	return c.ReaderFromFunc(c)
-//}
-
-// WriteTo writes provided data into connection targeting giving address.
-// NOTE: Not all may implement this has it's optional.
-//func (c Client) WriteTo(addr net.Addr, toWriteSize int) (io.WriteCloser, error) {
-//	if c.WriteFunc == nil {
-//		return nil, ErrWriteToAddrNotAllowed
-//	}
-//
-//	return c.WriteToFunc(c, addr, toWriteSize)
-//}
-
 // Read reads the underline data into the provided slice.
+// NOTE: Read does not differentiate between contents written into
+// the client through either client.Write or client.Stream, this is
+// left to the implementer to handle. Most would probably be using
+// implementations in the internal package (StreamWriter).
+//
+// NOTE: You can also wrap a client instance with the internal package's
+// StreamReader, which caters to organize received streams.
+//
+// Internal Package: (see github.com/influx6/mnet/blob/master/internal)
 func (c Client) Read() ([]byte, error) {
 	if c.ReaderFunc == nil {
 		return nil, ErrReadNotAllowed
@@ -294,13 +299,13 @@ func (c Client) Write(toWriteSize int) (io.WriteCloser, error) {
 // Stream returns a writer which chunks the incoming data of total size by the specified
 // chunk size, tagging each data with a identity ID which will be used to tag each data chunk
 // these allows us to stream very large data over the wire by reusing small memory for all writes.
-func (c Client) Stream(streamId string, totalWriteSize int, chunkSize int) (io.WriteCloser, error) {
-	if c.StreamFunc == nil {
-		return nil, ErrStreamNotAllowed
-	}
-
-	return c.StreamFunc(c, streamId, totalWriteSize, chunkSize)
-}
+//func (c Client) Stream(streamId string, totalWriteSize int, chunkSize int) (io.WriteCloser, error) {
+//	if c.StreamFunc == nil {
+//		return nil, ErrStreamNotAllowed
+//	}
+//
+//	return c.StreamFunc(c, streamId, totalWriteSize, chunkSize)
+//}
 
 // Flush sends all accumulated message within clients buffer into
 // connection.

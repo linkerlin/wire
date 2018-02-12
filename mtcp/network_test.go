@@ -216,7 +216,7 @@ func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mt
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.TLS = config
-	netw.ClientMaxWriteDeadline = 1 * time.Second
+	netw.MaxWriteDeadline = 1 * time.Second
 
 	netw.Handler = func(client mnet.Client) error {
 		for {

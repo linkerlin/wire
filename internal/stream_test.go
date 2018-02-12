@@ -7,11 +7,88 @@ import (
 
 	"bytes"
 
+	"time"
+
 	"github.com/influx6/faux/pools/done"
 	"github.com/influx6/faux/tests"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/internal"
 )
+
+func BenchmarkStreamedMessages(b *testing.B) {
+	b.StopTimer()
+	b.ReportAllocs()
+
+	streamId := "32-woff"
+	streams := internal.NewStreamedMessages(time.Minute*1, false)
+
+	ch := new(doWriter)
+	ch.do = func(p []byte) error {
+		return streams.Parse(p)
+	}
+
+	c := mnet.Client{
+		WriteFunc: func(_ mnet.Client, i int) (io.WriteCloser, error) {
+			return &limitWriter{limit: i, chunks: ch}, nil
+		},
+	}
+
+	toW := toWriter{data: data}
+
+	b.SetBytes(int64(len(data)))
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		newStream := internal.NewStreamWriter(c, streamId, 128, 10)
+		toW.WriteTo(newStream)
+		newStream.Close()
+	}
+	b.StopTimer()
+}
+
+func TestStreamedMessages(t *testing.T) {
+	streams := internal.NewStreamedMessages(time.Minute*1, false)
+
+	ch := new(doWriter)
+	ch.do = func(p []byte) error {
+		return streams.Parse(p)
+	}
+
+	var c mnet.Client
+	c.WriteFunc = func(_ mnet.Client, i int) (io.WriteCloser, error) {
+		return &limitWriter{limit: i, chunks: ch}, nil
+	}
+
+	newStream := internal.NewStreamWriter(c, "32-woff", 128, 10)
+
+	bu := bytes.NewBuffer(data)
+	if _, err := bu.WriteTo(newStream); err != nil {
+		tests.FailedWithError(err, "Should have successfully written data to stream")
+	}
+	tests.Passed("Should have successfully written data to stream")
+
+	if err := newStream.Close(); err != nil {
+		tests.FailedWithError(err, "Should have successfully closed stream")
+	}
+	tests.Passed("Should have successfully closed stream")
+
+	rec, meta, err := streams.Next()
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully collated streamed data")
+	}
+	tests.Passed("Should have successfully collated streamed data")
+
+	if !bytes.Equal(data, rec) {
+		tests.Info("Received: %+q\n", rec)
+		tests.Info("Expected: %+q\n", data)
+		tests.Failed("Should have matched received with input")
+	}
+	tests.Passed("Should have matched received with input")
+
+	if meta.Total != 128 {
+		tests.Failed("Should have matched total data sent")
+	}
+	tests.Passed("Should have matched total data sent")
+}
 
 func TestClientStream(t *testing.T) {
 	ch := new(chunkWriter)
@@ -44,6 +121,15 @@ func TestClientStream(t *testing.T) {
 	tests.Passed("Should have matched all streamed data")
 }
 
+type toWriter struct {
+	data []byte
+}
+
+func (t toWriter) WriteTo(w io.Writer) (int64, error) {
+	n, err := w.Write(t.data)
+	return int64(n), err
+}
+
 type limitWriter struct {
 	chunks io.Writer
 	cc     []byte
@@ -64,6 +150,18 @@ func (l *limitWriter) Write(p []byte) (int, error) {
 
 	l.cc = append(l.cc, p...)
 	return len(p), nil
+}
+
+type doWriter struct {
+	do func([]byte) error
+}
+
+func (l *doWriter) Close() error {
+	return nil
+}
+
+func (l *doWriter) Write(p []byte) (int, error) {
+	return len(p), l.do(p)
 }
 
 type chunkWriter struct {

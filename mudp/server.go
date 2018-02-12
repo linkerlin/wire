@@ -86,6 +86,14 @@ func (nc *netClient) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error) 
 	return stats, nil
 }
 
+//func (nc *netClient) stream(mn mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
+//	if err := nc.isAlive(mn); err != nil {
+//		return nil, err
+//	}
+//
+//	return internal.NewStreamWriter(mn, id, total, chunk), nil
+//}
+
 func (nc *netClient) write(mn mnet.Client, size int) (io.WriteCloser, error) {
 	if err := nc.isAlive(mn); err != nil {
 		return nil, err
@@ -145,18 +153,13 @@ func (nc *netClient) isAlive(_ mnet.Client) error {
 }
 
 func (nc *netClient) read(mn mnet.Client) ([]byte, error) {
-	data, _, err := nc.readFrom(mn)
-	return data, err
-}
-
-func (nc *netClient) readFrom(mn mnet.Client) ([]byte, net.Addr, error) {
 	if err := nc.isAlive(mn); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	indata, from, err := nc.parser.Next()
+	indata, err := nc.parser.Next()
 	atomic.AddInt64(&nc.totalReadMsgs, 1)
-	return indata, from, err
+	return indata, err
 }
 
 func (nc *netClient) flush(mn mnet.Client) error {
@@ -228,8 +231,8 @@ func (nc *netClient) close(mn mnet.Client) error {
 	return conn.Close()
 }
 
-func (nc *netClient) handleMessage(data []byte, target net.Addr) error {
-	err := nc.parser.Parse(data, target)
+func (nc *netClient) handleMessage(data []byte) error {
+	err := nc.parser.Parse(data)
 	if err == nil {
 		atomic.AddInt64(&nc.totalRead, int64(len(data)))
 	}
@@ -372,6 +375,7 @@ func (n *Network) getAllClient(skipAddr net.Addr) []mnet.Client {
 		mclient.ID = client.id
 		mclient.Metrics = n.Metrics
 		mclient.WriteFunc = client.write
+		//mclient.StreamFunc = client.stream
 		mclient.ReaderFunc = client.read
 		mclient.FlushFunc = client.flush
 		mclient.LiveFunc = client.isAlive
@@ -416,6 +420,7 @@ func (n *Network) getClient(addr net.Addr, core *net.UDPConn, h mnet.ConnHandler
 		mclient.ID = client.id
 		mclient.CloseFunc = client.close
 		mclient.WriteFunc = client.write
+		//mclient.StreamFunc = client.stream
 		mclient.ReaderFunc = client.read
 		mclient.FlushFunc = client.flush
 		mclient.LiveFunc = client.isAlive
@@ -475,7 +480,7 @@ func (n *Network) handleConnections(ctx context.Context, core *net.UDPConn) {
 		}
 
 		client := n.getClient(addr, core, n.Handler)
-		if err := client.handleMessage(incoming[:nn], addr); err != nil {
+		if err := client.handleMessage(incoming[:nn]); err != nil {
 			n.Metrics.Send(metrics.Entry{
 				ID:      n.ID,
 				Message: "client unable to handle message",
@@ -524,7 +529,6 @@ func (n *Network) Statistics() mnet.NetworkStatistic {
 	stats.RemoteAddr = n.raddr
 	stats.TotalClients = atomic.LoadInt64(&n.totalClients)
 	stats.TotalClosed = atomic.LoadInt64(&n.totalClosed)
-	stats.TotalActive = atomic.LoadInt64(&n.totalActive)
 	stats.TotalOpened = atomic.LoadInt64(&n.totalOpened)
 	return stats
 }

@@ -129,9 +129,10 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.NID = network.nid
 	c.Metrics = network.metrics
 	c.CloseFunc = network.close
-	c.WriteFunc = network.write
 	c.ReaderFunc = network.read
+	c.WriteFunc = network.write
 	c.FlushFunc = network.flush
+	//c.StreamFunc = network.stream
 	c.LiveFunc = network.isAlive
 	c.StatisticFunc = network.getStatistics
 	c.LiveFunc = network.isAlive
@@ -223,7 +224,7 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 
 	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
 	for {
-		n, addr, err := conn.ReadFrom(incoming)
+		n, _, err := conn.ReadFrom(incoming)
 		if err != nil {
 			cn.metrics.Send(metrics.Entry{
 				ID:      cn.id,
@@ -241,7 +242,7 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 			continue
 		}
 
-		if err := cn.handleMessage(incoming[:n], addr); err != nil {
+		if err := cn.handleMessage(incoming[:n]); err != nil {
 			cn.metrics.Send(metrics.Entry{
 				ID:      cn.id,
 				Message: "ParseError: failed to parse message",

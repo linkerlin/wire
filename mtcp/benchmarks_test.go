@@ -106,7 +106,7 @@ func benchThis(b *testing.B, payload []byte) {
 		return
 	}
 
-	netw.ClientMaxWriteSize = defaultClientSize
+	netw.MaxWriteSize = defaultClientSize
 
 	client, err := mtcp.Connect("localhost:5050", mtcp.Metrics(events), mtcp.MaxBuffer(defaultClientSize))
 	if err != nil {
@@ -137,7 +137,7 @@ func createBenchmarkNetwork(ctx context.Context, addr string, config *tls.Config
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.TLS = config
-	netw.ClientMaxWriteDeadline = 1 * time.Second
+	netw.MaxWriteDeadline = 1 * time.Second
 
 	netw.Handler = func(client mnet.Client) error {
 		// Flush all incoming data out
