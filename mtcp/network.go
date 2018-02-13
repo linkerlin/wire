@@ -190,11 +190,6 @@ func (nc *networkConn) handleCLStatusReceive(cm mnet.Client, data []byte) error 
 	info.Cluster = info.Cluster
 	nc.srcInfo = &info
 
-	// Add cluster into address.
-	nc.network.ccu.Lock()
-	nc.network.clusters[nc.srcInfo.ServerAddr] = info
-	nc.network.ccu.Unlock()
-
 	wc, err := nc.write(cm, len(handshakeCompletedBytes))
 	if err != nil {
 		return err
@@ -488,8 +483,6 @@ type Network struct {
 
 	raddr    net.Addr
 	pool     chan func()
-	ccu      sync.RWMutex
-	clusters map[string]mnet.Info
 	cu       sync.RWMutex
 	clients  map[string]*networkConn
 	ctx      context.Context
@@ -533,7 +526,6 @@ func (n *Network) Start(ctx context.Context) error {
 	n.raddr = stream.Addr()
 	n.pool = make(chan func(), 0)
 	n.clients = make(map[string]*networkConn)
-	n.clusters = make(map[string]mnet.Info)
 
 	if n.MaxWriteSize <= 0 {
 		n.MaxWriteSize = mnet.MaxBufferSize
@@ -656,13 +648,23 @@ func (n *Network) AddCluster(addr string, cluster bool) error {
 	return n.addClient(conn, cluster)
 }
 
+// connectedToMe returns true/false if we are already connected to server.
 func (n *Network) connectedToMe(conn net.Conn) bool {
-	n.ccu.RLock()
-	defer n.ccu.RUnlock()
+	n.cu.Lock()
+	defer n.cu.Unlock()
 
-	remoteAddr := conn.RemoteAddr()
-	_, ok := n.clusters[remoteAddr.String()]
-	return ok
+	remote := conn.RemoteAddr().String()
+	for _, conn := range n.clients {
+		if conn.srcInfo == nil {
+			continue
+		}
+
+		if conn.srcInfo.ServerAddr == remote {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (n *Network) addClient(conn net.Conn, isCluster bool) error {
@@ -754,12 +756,7 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 		break
 	}
 
-	myinfo := cn.getInfo(client)
 	if isCluster {
-		n.ccu.Lock()
-		n.clusters[myinfo.ServerAddr] = myinfo
-		n.ccu.Unlock()
-
 		if err := cn.handleCLStatusSend(client); err != nil {
 			return err
 		}
@@ -789,7 +786,7 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 	}
 
 	atomic.AddInt64(&n.totalClients, 1)
-	go func(info mnet.Info) {
+	go func() {
 		if err := n.Handler(client); err != nil {
 			client.Close()
 		}
@@ -797,13 +794,7 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 		n.cu.Lock()
 		delete(n.clients, uuid)
 		n.cu.Unlock()
-
-		if isCluster {
-			n.ccu.Lock()
-			delete(n.clusters, info.ServerAddr)
-			n.ccu.Unlock()
-		}
-	}(myinfo)
+	}()
 
 	return nil
 }
