@@ -456,10 +456,13 @@ type Network struct {
 	ID         string
 	Addr       string
 	ServerName string
-	Dialer     *net.Dialer
 	TLS        *tls.Config
 	Handler    mnet.ConnHandler
 	Metrics    metrics.Metrics
+
+	// Dialer to be used to create net.Conn to connect to cluster address
+	// in Network.AddCluster. Set to use a custom dialer.
+	Dialer *net.Dialer
 
 	totalClients int64
 	totalClosed  int64
@@ -545,12 +548,12 @@ func (n *Network) Start(ctx context.Context) error {
 
 	n.routines.Add(2)
 	go n.runStream(stream)
-	go n.endLogic(ctx, stream)
+	go n.handleClose(ctx, stream)
 
 	return nil
 }
 
-func (n *Network) endLogic(ctx context.Context, stream melon.ConnReadWriteCloser) {
+func (n *Network) handleClose(ctx context.Context, stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
 
 	<-ctx.Done()
