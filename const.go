@@ -31,10 +31,9 @@ const (
 	// during no-use. It is used by net.Dialer.
 	DefaultKeepAlive = 3 * time.Minute
 
-	// MaxStreamStaleness sets the default maximum time for stream staleness, where if
-	// giving stream has not received any new data, then collected values will be freed
-	// and relocated back to free memory.
-	MaxStreamStaleness = 10 * time.Minute
+	// MaxInfoWait sets the default duration to wait for arrival of connection info else
+	// closing the connection.
+	MaxInfoWait = time.Second * 5
 
 	// MaxConnections sets a default maximum connection allowed for a giving network.
 	MaxConnections = 8000
@@ -47,4 +46,16 @@ const (
 
 	// MaxHeaderSize defines size of max header for message header length.
 	MaxHeaderSize = uint32(4294967295)
+
+	// CINFO defines a action key for requesting connection info.
+	CINFO = "MNET:CINFO"
+
+	// RINFO defines a action key for responding to a CINFO request.
+	RINFO = "MNET:RINFO "
+
+	// CLSTATUS defines a action key for responding with cluster status info.
+	CLSTATUS = "MNET:CLSTATUS "
+
+	// CLHandshake defines a action key for responding with a handshake completed.
+	CLHANDSHAKECOMPLETED = "MNET:Handshake:Completed"
 )

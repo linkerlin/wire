@@ -15,6 +15,8 @@ import (
 
 	"bytes"
 
+	"encoding/json"
+
 	"github.com/influx6/faux/metrics"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/faux/pools/done"
@@ -26,14 +28,22 @@ import (
 )
 
 var (
-	bufferPool = done.NewDonePool(218, 20)
+	cinfoBytes              = []byte(mnet.CINFO)
+	rinfoBytes              = []byte(mnet.RINFO)
+	clStatusBytes           = []byte(mnet.CLSTATUS)
+	handshakeCompletedBytes = []byte(mnet.CLHANDSHAKECOMPLETED)
+	bufferPool              = done.NewDonePool(218, 20)
 )
 
 type networkConn struct {
+	isACluster bool
 	nid        string
 	id         string
+	serverAddr net.Addr
 	localAddr  net.Addr
 	remoteAddr net.Addr
+	srcInfo    *mnet.Info
+	network    *Network
 	metrics    metrics.Metrics
 	worker     sync.WaitGroup
 	do         sync.Once
@@ -42,6 +52,7 @@ type networkConn struct {
 	maxDeadline       time.Duration
 	maxStreamDeadline time.Duration
 
+	ready          int64
 	totalRead      int64
 	totalWritten   int64
 	totalFlushOut  int64
@@ -51,13 +62,24 @@ type networkConn struct {
 
 	sos    *guardedBuffer
 	parser *internal.TaggedMessages
-	//streams *internal.StreamedMessages
 
 	mu   sync.RWMutex
 	conn net.Conn
 
 	bu         sync.Mutex
 	buffWriter *bufio.Writer
+}
+
+// isCluster returns true/false if a giving connection is actually
+// connected to another server i.e a server-to-server and not a
+// client-to-server connection.
+func (nc *networkConn) isCluster(cm mnet.Client) bool {
+	return nc.isACluster
+}
+
+// isReady returns an true/false if client is ready.
+func (nc *networkConn) isReady() bool {
+	return atomic.LoadInt64(&nc.ready) == 1
 }
 
 // isLive returns an error if networkconn is disconnected from network.
@@ -113,13 +135,128 @@ func (nc *networkConn) flush(cm mnet.Client) error {
 
 // read returns data from the underline message list.
 func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
-	if err := nc.isLive(cm); err != nil {
+	if cerr := nc.isLive(cm); cerr != nil {
+		return nil, cerr
+	}
+
+	atomic.AddInt64(&nc.totalReadMsgs, 1)
+
+	indata, err := nc.parser.Next()
+	if err != nil {
 		return nil, err
 	}
 
-	indata, err := nc.parser.Next()
-	atomic.AddInt64(&nc.totalReadMsgs, 1)
-	return indata, err
+	if bytes.HasPrefix(indata, cinfoBytes) {
+		if err := nc.handleCINFO(cm); err != nil {
+			return nil, err
+		}
+		return nil, mnet.ErrNoDataYet
+	}
+
+	if bytes.HasPrefix(indata, clStatusBytes) {
+		if err := nc.handleCLStatusReceive(cm, indata); err != nil {
+			return nil, err
+		}
+		return nil, mnet.ErrNoDataYet
+	}
+
+	return indata, nil
+}
+
+func (nc *networkConn) getInfo(cm mnet.Client) mnet.Info {
+	var base mnet.Info
+	if nc.isCluster(cm) && nc.srcInfo != nil {
+		base = *nc.srcInfo
+	} else {
+		base = mnet.Info{
+			ID:         nc.id,
+			ServerNode: true,
+			Cluster:    nc.isACluster,
+			ServerAddr: nc.serverAddr.String(),
+		}
+	}
+
+	return base
+}
+
+func (nc *networkConn) handleCLStatusReceive(cm mnet.Client, data []byte) error {
+	data = bytes.TrimPrefix(data, clStatusBytes)
+
+	var info mnet.Info
+	if err := json.Unmarshal(data, &info); err != nil {
+		return err
+	}
+
+	info.Cluster = info.Cluster
+	nc.srcInfo = &info
+
+	// Add cluster into address.
+	nc.network.ccu.Lock()
+	nc.network.clusters[nc.srcInfo.ServerAddr] = info
+	nc.network.ccu.Unlock()
+
+	wc, err := nc.write(cm, len(handshakeCompletedBytes))
+	if err != nil {
+		return err
+	}
+
+	wc.Write(handshakeCompletedBytes)
+	wc.Close()
+	return nc.flush(cm)
+}
+
+func (nc *networkConn) handleCLStatusSend(cm mnet.Client) error {
+	var info mnet.Info
+	info.Cluster = true
+	info.ServerNode = true
+	info.ID = nc.network.ID
+	info.ServerAddr = nc.network.raddr.String()
+
+	jsn, err := json.Marshal(info)
+	if err != nil {
+		return err
+	}
+
+	wc, err := nc.write(cm, len(jsn)+len(clStatusBytes))
+	if err != nil {
+		return err
+	}
+
+	wc.Write(clStatusBytes)
+	wc.Write(jsn)
+	wc.Close()
+	return nc.flush(cm)
+}
+
+func (nc *networkConn) handleCINFO(cm mnet.Client) error {
+	jsn, err := json.Marshal(nc.getInfo(cm))
+	if err != nil {
+		return err
+	}
+
+	wc, err := nc.write(cm, len(jsn)+len(rinfoBytes))
+	if err != nil {
+		return err
+	}
+
+	wc.Write(rinfoBytes)
+	wc.Write(jsn)
+	wc.Close()
+	return nc.flush(cm)
+}
+
+func (nc *networkConn) handleRINFO(data []byte) error {
+	data = bytes.TrimPrefix(data, rinfoBytes)
+
+	var info mnet.Info
+	if err := json.Unmarshal(data, &info); err != nil {
+		return err
+	}
+
+	info.Cluster = nc.isACluster
+	nc.srcInfo = &info
+	atomic.StoreInt64(&nc.ready, 1)
+	return nil
 }
 
 func (nc *networkConn) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
@@ -314,11 +451,17 @@ func (nc *networkConn) readLoop(cm mnet.Client) {
 
 type networkAction func(*Network)
 
+type netAddr struct {
+	Local  net.Addr
+	Remote net.Addr
+}
+
 // Network defines a network which runs ontop of provided mnet.ConnHandler.
 type Network struct {
 	ID         string
 	Addr       string
 	ServerName string
+	Dialer     *net.Dialer
 	TLS        *tls.Config
 	Handler    mnet.ConnHandler
 	Metrics    metrics.Metrics
@@ -332,9 +475,9 @@ type Network struct {
 	// giving network.
 	MaxConnections int
 
-	// MaxStreamStaleness defines the maximum duration allowed for a
-	// giving stream from being stale.
-	MaxStreamStaleness time.Duration
+	// MaxInfoWait defines the maximum duration allowed for a
+	// waiting for MNET:CINFO response.
+	MaxInfoWait time.Duration
 
 	// MaxWriteDeadline defines max time before all clients collected writes must be written to the connection.
 	MaxWriteDeadline time.Duration
@@ -345,6 +488,8 @@ type Network struct {
 
 	raddr    net.Addr
 	pool     chan func()
+	ccu      sync.RWMutex
+	clusters map[string]mnet.Info
 	cu       sync.RWMutex
 	clients  map[string]*networkConn
 	ctx      context.Context
@@ -388,6 +533,7 @@ func (n *Network) Start(ctx context.Context) error {
 	n.raddr = stream.Addr()
 	n.pool = make(chan func(), 0)
 	n.clients = make(map[string]*networkConn)
+	n.clusters = make(map[string]mnet.Info)
 
 	if n.MaxWriteSize <= 0 {
 		n.MaxWriteSize = mnet.MaxBufferSize
@@ -397,8 +543,8 @@ func (n *Network) Start(ctx context.Context) error {
 		n.MaxConnections = mnet.MaxConnections
 	}
 
-	if n.MaxStreamStaleness <= 0 {
-		n.MaxStreamStaleness = mnet.MaxStreamStaleness
+	if n.MaxInfoWait <= 0 {
+		n.MaxInfoWait = mnet.MaxInfoWait
 	}
 
 	if n.MaxWriteDeadline <= 0 {
@@ -469,8 +615,10 @@ func (n *Network) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 		client.ID = conn.id
 		client.Metrics = n.Metrics
 		client.LiveFunc = conn.isLive
+		client.InfoFunc = conn.getInfo
 		client.FlushFunc = conn.flush
 		client.WriteFunc = conn.write
+		client.IsClusterFunc = conn.isCluster
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr
@@ -481,14 +629,43 @@ func (n *Network) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 	return clients, nil
 }
 
-// AddClient adds a new websocket client through the provided
-// net.Conn.
-func (n *Network) AddClient(conn net.Conn) error {
-	go n.addClient(conn)
-	return nil
+var defaultDialer = &net.Dialer{Timeout: 2 * time.Second}
+
+// AddCluster attempts to add new connection to another mnet tcp server.
+// It will attempt to dial specified address returning an error if the
+// giving address failed or was not able to meet the handshake protocols.
+func (n *Network) AddCluster(addr string, cluster bool) error {
+	var err error
+	var conn net.Conn
+
+	if n.Dialer != nil {
+		conn, err = n.Dialer.Dial("tcp", addr)
+	} else {
+		conn, err = defaultDialer.Dial("tcp", addr)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	if n.connectedToMe(conn) {
+		conn.Close()
+		return mnet.ErrAlreadyServiced
+	}
+
+	return n.addClient(conn, cluster)
 }
 
-func (n *Network) addClient(conn net.Conn) {
+func (n *Network) connectedToMe(conn net.Conn) bool {
+	n.ccu.RLock()
+	defer n.ccu.RUnlock()
+
+	remoteAddr := conn.RemoteAddr()
+	_, ok := n.clusters[remoteAddr.String()]
+	return ok
+}
+
+func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 	defer atomic.AddInt64(&n.totalOpened, -1)
 	defer atomic.AddInt64(&n.totalClosed, 1)
 
@@ -515,21 +692,25 @@ func (n *Network) addClient(conn net.Conn) {
 	cn.id = uuid
 	cn.nid = n.ID
 	cn.conn = conn
+	cn.network = n
 	cn.metrics = n.Metrics
+	cn.serverAddr = n.raddr
+	cn.isACluster = isCluster
 	cn.localAddr = conn.LocalAddr()
 	cn.remoteAddr = conn.RemoteAddr()
 	cn.maxWrite = n.MaxWriteSize
+	cn.sos = newGuardedBuffer(512)
 	cn.maxDeadline = n.MaxWriteDeadline
-	cn.maxStreamDeadline = n.MaxStreamStaleness
 	cn.parser = new(internal.TaggedMessages)
 	cn.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
-	cn.sos = newGuardedBuffer(512)
 
 	client.LiveFunc = cn.isLive
+	client.InfoFunc = cn.getInfo
 	client.ReaderFunc = cn.read
 	client.WriteFunc = cn.write
 	client.FlushFunc = cn.flush
 	client.CloseFunc = cn.closeConn
+	client.IsClusterFunc = cn.isCluster
 	client.LocalAddrFunc = cn.getLocalAddr
 	client.StatisticFunc = cn.getStatistics
 	client.SiblingsFunc = n.getOtherClients
@@ -542,14 +723,89 @@ func (n *Network) addClient(conn net.Conn) {
 	n.clients[uuid] = cn
 	n.cu.Unlock()
 
-	atomic.AddInt64(&n.totalClients, 1)
-	if err := n.Handler(client); err != nil {
-		client.Close()
+	if wc, err := cn.write(client, len(cinfoBytes)); err == nil {
+		wc.Write(cinfoBytes)
+		wc.Close()
+		cn.flush(client)
 	}
 
-	n.cu.Lock()
-	delete(n.clients, uuid)
-	n.cu.Unlock()
+	before := time.Now()
+
+	// Wait for info response.
+	for {
+		msg, err := cn.read(client)
+		if err != nil {
+			if err != mnet.ErrNoDataYet {
+				return err
+			}
+
+			continue
+		}
+
+		if time.Now().Sub(before) > n.MaxInfoWait {
+			client.Close()
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		if err := cn.handleRINFO(msg); err != nil {
+			return err
+		}
+
+		break
+	}
+
+	myinfo := cn.getInfo(client)
+	if isCluster {
+		n.ccu.Lock()
+		n.clusters[myinfo.ServerAddr] = myinfo
+		n.ccu.Unlock()
+
+		if err := cn.handleCLStatusSend(client); err != nil {
+			return err
+		}
+
+		// Wait for handshake completion.
+		for {
+			msg, err := cn.read(client)
+			if err != nil {
+				if err != mnet.ErrNoDataYet {
+					return err
+				}
+
+				continue
+			}
+
+			if time.Now().Sub(before) > n.MaxInfoWait {
+				client.Close()
+				return mnet.ErrFailedToCompleteHandshake
+			}
+
+			if !bytes.Equal(msg, handshakeCompletedBytes) {
+				return mnet.ErrFailedToCompleteHandshake
+			}
+
+			break
+		}
+	}
+
+	atomic.AddInt64(&n.totalClients, 1)
+	go func(info mnet.Info) {
+		if err := n.Handler(client); err != nil {
+			client.Close()
+		}
+
+		n.cu.Lock()
+		delete(n.clients, uuid)
+		n.cu.Unlock()
+
+		if isCluster {
+			n.ccu.Lock()
+			delete(n.clusters, info.ServerAddr)
+			n.ccu.Unlock()
+		}
+	}(myinfo)
+
+	return nil
 }
 
 // runStream runs the process of listening for new connections and
@@ -606,7 +862,7 @@ func (n *Network) runStream(stream melon.ConnReadWriteCloser) {
 
 		atomic.AddInt64(&n.totalClients, 1)
 		atomic.AddInt64(&n.totalOpened, 1)
-		go n.addClient(newConn)
+		n.addClient(newConn, false)
 	}
 }
 

@@ -30,42 +30,46 @@ type WriteFunc func(Client, int) (io.WriteCloser, error)
 // sizes with minimal wait.
 type StreamFunc func(Client, string, int, int) (io.WriteCloser, error)
 
-// ClientSiblingsFunc defines a function which returns a list of sibling funcs.
-type ClientSiblingsFunc func(Client) ([]Client, error)
+// SiblingsFunc defines a function which returns a list of sibling funcs.
+type SiblingsFunc func(Client) ([]Client, error)
+
+// AddrFunc defines a function type which returns a net.Addr for a client.
+type AddrFunc func(Client) (net.Addr, error)
 
 // ClientFunc defines a function type which receives a Client type and
 // returns a possible error.
 type ClientFunc func(Client) error
 
-// ClientWithAddrFunc defines a function type which receives a Client type and
-// and net.Addr and returns a possible error.
-type ClientWithAddrFunc func(Client, net.Addr) error
+// InfoFunc defines a function type which returns a Info struct
+// for giving client.
+type InfoFunc func(Client) Info
 
-// ClientAddrFunc returns a net.Addr associated with a given client else
-// an error.
-type ClientAddrFunc func(Client) (net.Addr, error)
+// StateFunc defines a function type which receives a Client type and
+// returns a boolean value.
+type StateFunc func(Client) bool
 
-// ClientExpandBufferFunc expands the internal client collecting buffer.
-type ClientExpandBufferFunc func(Client, int) error
-
-// ClientReconnectionFunc defines a function type which receives a Client pointer type and
+// ReconnectionFunc defines a function type which receives a Client pointer type and
 // is responsible for the reconnection of the client client connection.
-type ClientReconnectionFunc func(Client, string) error
+type ReconnectionFunc func(Client, string) error
 
-// ClientStatisticsFunc defines a function type which returns a Statistics
+// StatisticsFunc defines a function type which returns a Statistics
 // structs related to the user.
-type ClientStatisticsFunc func(Client) (ClientStatistic, error)
+type StatisticsFunc func(Client) (ClientStatistic, error)
 
 // errors ...
 var (
+	ErrNotSupported                  = errors.New("feature not supported")
 	ErrStreamerClosed                = errors.New("data stream writer is closed")
 	ErrClientAlreadyExists           = errors.New("client with id exists")
+	ErrFailedToRecieveInfo           = errors.New("failed to receive info")
+	ErrFailedToCompleteHandshake     = errors.New("failed to complete handshake")
 	ErrNoDataYet                     = errors.New("data is not yet available for reading")
 	ErrAlreadyClosed                 = errors.New("already closed connection")
 	ErrReadNotAllowed                = errors.New("reading not allowed")
 	ErrLiveCheckNotAllowed           = errors.New("live status not allowed or supported")
 	ErrWriteNotAllowed               = errors.New("data writing not allowed")
-	ErrStreamNotAllowed              = errors.New("stream writing not allowed")
+	ErrNoClusterServicing            = errors.New("cluster connections not servicable")
+	ErrAlreadyServiced               = errors.New("cluster connections already serviced")
 	ErrNoHostNameInAddr              = errors.New("addr must have hostname")
 	ErrStillConnected                = errors.New("connection still active")
 	ErrReadFromNotAllowed            = errors.New("reading from a addr not allowed")
@@ -137,6 +141,14 @@ type ClientStatistic struct {
 	Reconnects      int64
 }
 
+// Info emodies a struct to contain specific info related to a giving connection.
+type Info struct {
+	Cluster    bool
+	ServerNode bool
+	ID         string
+	ServerAddr string
+}
+
 //*************************************************************************
 // mnet.Client Method and Implementation
 //*************************************************************************
@@ -146,18 +158,32 @@ type Client struct {
 	ID               string
 	NID              string
 	Metrics          metrics.Metrics
-	LocalAddrFunc    ClientAddrFunc
-	RemoteAddrFunc   ClientAddrFunc
+	LocalAddrFunc    AddrFunc
+	RemoteAddrFunc   AddrFunc
 	ReaderFunc       ReaderFunc
 	WriteFunc        WriteFunc
+	InfoFunc         InfoFunc
 	CloseFunc        ClientFunc
 	LiveFunc         ClientFunc
 	FlushFunc        ClientFunc
-	FlushAddrFunc    ClientWithAddrFunc
-	SiblingsFunc     ClientSiblingsFunc
-	StatisticFunc    ClientStatisticsFunc
-	ReconnectionFunc ClientReconnectionFunc
-	//StreamFunc       StreamFunc
+	IsClusterFunc    StateFunc
+	SiblingsFunc     SiblingsFunc
+	StatisticFunc    StatisticsFunc
+	ReconnectionFunc ReconnectionFunc
+}
+
+// Info returns associated info of giving client.
+// WARNING: Note that Info may in the case of a client representing
+// a another Server will return information for that server and not
+// information regarding it's local address. Use Clent.RemoteAddr()
+// and Client.LocalAddr() to get accurate on-machine address for
+// client.
+func (c Client) Info() Info {
+	if c.InfoFunc == nil {
+		return Info{ID: c.ID}
+	}
+
+	return c.InfoFunc(c)
 }
 
 // LocalAddr returns local address associated with given client.
@@ -210,6 +236,18 @@ func (c Client) RemoteAddr() (net.Addr, error) {
 	}
 
 	return addr, nil
+}
+
+// IsCluster returns true if giving connection is a server-to-server
+// connection or false if its a client-to-cluster connection.
+// NOTE: It will by default returns false if no function for Client.IsClusterFunc
+// is provided.
+func (c Client) IsCluster() bool {
+	if c.IsClusterFunc == nil {
+		return false
+	}
+
+	return c.IsClusterFunc(c)
 }
 
 // Live returns an error if client is not currently live or connected to
@@ -296,17 +334,6 @@ func (c Client) Write(toWriteSize int) (io.WriteCloser, error) {
 
 	return c.WriteFunc(c, toWriteSize)
 }
-
-// Stream returns a writer which chunks the incoming data of total size by the specified
-// chunk size, tagging each data with a identity ID which will be used to tag each data chunk
-// these allows us to stream very large data over the wire by reusing small memory for all writes.
-//func (c Client) Stream(streamId string, totalWriteSize int, chunkSize int) (io.WriteCloser, error) {
-//	if c.StreamFunc == nil {
-//		return nil, ErrStreamNotAllowed
-//	}
-//
-//	return c.StreamFunc(c, streamId, totalWriteSize, chunkSize)
-//}
 
 // Flush sends all accumulated message within clients buffer into
 // connection.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"encoding/binary"
+	"encoding/json"
 
 	"github.com/influx6/faux/metrics"
 	"github.com/influx6/faux/netutils"
@@ -80,13 +81,6 @@ func DialTimeout(dur time.Duration) ConnectOptions {
 	}
 }
 
-// StreamStaleness sets the maximum stream staleness allowed for streamed data.
-func StreamStaleness(dur time.Duration) ConnectOptions {
-	return func(cm *clientNetwork) {
-		cm.streamStaleness = dur
-	}
-}
-
 // NetworkID sets the id used by the client connection for identifying the
 // associated network.
 func NetworkID(id string) ConnectOptions {
@@ -123,10 +117,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.metrics = metrics.New()
 	}
 
-	if network.streamStaleness <= 0 {
-		network.streamStaleness = mnet.MaxStreamStaleness
-	}
-
 	if network.dialTimeout <= 0 {
 		network.dialTimeout = mnet.DefaultDialTimeout
 	}
@@ -153,8 +143,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	network.id = c.ID
 	network.addr = addr
 	network.parser = new(internal.TaggedMessages)
-	//network.streams = internal.NewStreamedMessages(network.streamStaleness)
-	//network.scratch = bytes.NewBuffer(make([]byte, 0, mnet.DefaultReconnectBufferSize))
 	network.buffWriter = bufio.NewWriterSize(network.scratch, network.clientMaxWriteSize)
 
 	c.Metrics = network.metrics
@@ -162,7 +150,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.FlushFunc = network.flush
 	c.ReaderFunc = network.read
 	c.WriteFunc = network.write
-	//c.StreamFunc = network.stream
 	c.CloseFunc = network.close
 	c.LocalAddrFunc = network.getLocalAddr
 	c.RemoteAddrFunc = network.getRemoteAddr
@@ -190,7 +177,6 @@ type clientNetwork struct {
 	keepAliveTimeout time.Duration
 
 	clientMaxWriteSize     int
-	streamStaleness        time.Duration
 	clientMaxWriteDeadline time.Duration
 
 	parser     *internal.TaggedMessages
@@ -213,6 +199,35 @@ type clientNetwork struct {
 
 	cu   sync.RWMutex
 	conn net.Conn
+}
+
+func (cn *clientNetwork) handleCINFO(cm mnet.Client) error {
+	jsn, err := json.Marshal(cn.getInfo(cm))
+	if err != nil {
+		return err
+	}
+
+	wc, err := cn.write(cm, len(jsn)+len(rinfoBytes))
+	if err != nil {
+		return err
+	}
+
+	wc.Write(rinfoBytes)
+	wc.Write(jsn)
+
+	return wc.Close()
+}
+
+func (cn *clientNetwork) getInfo(cm mnet.Client) mnet.Info {
+	addr := cn.addr
+	if cn.remoteAddr != nil {
+		addr = cn.remoteAddr.String()
+	}
+
+	return mnet.Info{
+		ID:         cn.id,
+		ServerAddr: addr,
+	}
 }
 
 func (cn *clientNetwork) getStatistics(cm mnet.Client) (mnet.ClientStatistic, error) {
@@ -289,14 +304,6 @@ func (cn *clientNetwork) flush(cm mnet.Client) error {
 	return err
 }
 
-//func (cn *clientNetwork) stream(cm mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
-//	if err := cn.isLive(cm); err != nil {
-//		return nil, err
-//	}
-//
-//	return internal.NewStreamWriter(cm, id, total, chunk), nil
-//}
-
 func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
 	if err := cn.isLive(cm); err != nil {
 		return nil, err
@@ -355,7 +362,22 @@ func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
 
 	indata, err := cn.parser.Next()
 	atomic.AddInt64(&cn.totalRead, int64(len(indata)))
-	return indata, err
+	if err != nil {
+		return nil, err
+	}
+
+	if bytes.HasPrefix(indata, cinfoBytes) {
+		if err := cn.handleCINFO(cm); err != nil {
+			return nil, err
+		}
+		return nil, mnet.ErrNoDataYet
+	}
+
+	//if bytes.Equal(indata, rinfoBytes) {
+	//	return nil, mnet.ErrNoDataYet
+	//}
+
+	return indata, nil
 }
 
 func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
@@ -489,7 +511,32 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	cn.worker.Add(1)
 	go cn.readLoop(cm, conn)
 
-	return nil
+	return cn.respondToINFO(cm)
+}
+
+func (cn *clientNetwork) respondToINFO(cm mnet.Client) error {
+	before := time.Now()
+
+	for {
+		msg, err := cn.parser.Next()
+		if err != nil {
+			if err != mnet.ErrNoDataYet {
+				return err
+			}
+
+			continue
+		}
+
+		if time.Now().Sub(before) > mnet.MaxInfoWait {
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		if !bytes.Equal(msg, cinfoBytes) {
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		return cn.handleCINFO(cm)
+	}
 }
 
 // getConn returns net.Conn for giving addr.
