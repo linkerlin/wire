@@ -1,7 +1,6 @@
 package mtcp_test
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
@@ -33,115 +32,6 @@ func initMetrics() {
 	if testing.Verbose() {
 		events = metrics.New(custom.StackDisplay(os.Stderr))
 	}
-}
-
-func TestNonTLSNetworkWithNetConn(t *testing.T) {
-	initMetrics()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createNewNetwork(ctx, "localhost:4050", nil)
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully create network")
-	}
-	tests.Passed("Should have successfully create network")
-
-	conn, err := dialer.Dial("tcp", "localhost:4050")
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully connected to network")
-	}
-	tests.Passed("Should have successfully connected to network")
-
-	payload := makeMessage([]byte("pub help"))
-	if _, err := conn.Write(payload); err != nil {
-		tests.FailedWithError(err, "Should have delivered message to network as client")
-	}
-	tests.Passed("Should have delivered message to network as client")
-
-	expected := []byte("now publishing to [help]\r\n")
-	received, err := readMessage(conn)
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully read message from network")
-	}
-	tests.Passed("Should have successfully read message from network")
-
-	if !bytes.Equal(received, expected) {
-		tests.Info("Received: %+q", received)
-		tests.Info("Expected: %+q", expected)
-		tests.FailedWithError(err, "Should have successfully matched expected data with received from network")
-	}
-	tests.Passed("Should have successfully matched expected data with received from network")
-
-	conn.Close()
-	cancel()
-
-	netw.Wait()
-}
-
-func TestTLSNetworkWithNetConn(t *testing.T) {
-	initMetrics()
-
-	_, server, client, err := createTLSCA()
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully created server and client certs")
-	}
-	tests.Passed("Should have successfully created server and client certs")
-
-	serverTls, err := server.TLSServerConfig(true)
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully create sever's tls config")
-	}
-	tests.Passed("Should have successfully create sever's tls config")
-
-	clientTls, err := client.TLSClientConfig()
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully create sever's tls config")
-	}
-	tests.Passed("Should have successfully create sever's tls config")
-
-	clientTls.ServerName = "localhost"
-
-	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createNewNetwork(ctx, "localhost:4050", serverTls)
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully create network")
-	}
-	tests.Passed("Should have successfully create network")
-
-	conn, err := tls.DialWithDialer(dialer, "tcp", "localhost:4050", clientTls)
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully connected to network")
-	}
-	tests.Passed("Should have successfully connected to network")
-
-	if err := conn.Handshake(); err != nil {
-		tests.FailedWithError(err, "Should have successfully Handshaked tls connection")
-	}
-	tests.Passed("Should have successfully Handshaked tls connection")
-
-	payload := makeMessage([]byte("pub help"))
-	if _, err := conn.Write(payload); err != nil {
-		tests.FailedWithError(err, "Should have delivered message to network as client")
-	}
-	tests.Passed("Should have delivered message to network as client")
-
-	expected := []byte("now publishing to [help]\r\n")
-	received, err := readMessage(conn)
-	if err != nil {
-		tests.FailedWithError(err, "Should have successfully read message from network")
-	}
-	tests.Passed("Should have successfully read message from network")
-
-	if !bytes.Equal(received, expected) {
-		tests.Info("Received: %+q", received)
-		tests.Info("Expected: %+q", expected)
-		tests.FailedWithError(err, "Should have successfully matched expected data with received from network")
-	}
-	tests.Passed("Should have successfully matched expected data with received from network")
-
-	conn.Close()
-	cancel()
-
-	netw.Wait()
 }
 
 func TestNetwork_Add(t *testing.T) {
@@ -227,6 +117,40 @@ func TestNetwork_Add(t *testing.T) {
 	}
 	tests.Passed("Should have matched cluster server to second mnet network")
 
+}
+
+func TestNetwork_ClusterConnect(t *testing.T) {
+	initMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	netw, err := createNewNetwork(ctx, "localhost:4050", nil)
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully create network")
+	}
+	tests.Passed("Should have successfully create network")
+
+	netw2, err := createInfoNetwork(ctx, "localhost:7050", nil)
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully create network")
+	}
+	tests.Passed("Should have successfully create network")
+
+	// Should succesfully connect to cluster on localhost:4050
+	if err := netw2.AddCluster("localhost:4050", true); err != nil {
+		tests.FailedWithError(err, "Should have successfully connect to cluster")
+	}
+	tests.Passed("Should have successfully connect to cluster")
+
+	// Should fail to connect to cluster on localhost:7050 since we are connected already.
+	if err := netw.AddCluster("localhost:7050", true); err == nil {
+		tests.Failed("Should have failed to connect to already connected cluster")
+	}
+	tests.Passed("Should have failed to connect to already connected cluster")
+
+	cancel()
+	netw.Wait()
+	netw2.Wait()
 }
 
 func readMessage(conn net.Conn) ([]byte, error) {
