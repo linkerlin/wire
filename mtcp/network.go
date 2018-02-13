@@ -133,7 +133,8 @@ func (nc *networkConn) flush(cm mnet.Client) error {
 	return err
 }
 
-// read returns data from the underline message list.
+// read reads from incoming message handling necessary
+// handshake response and requests received over the wire.
 func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
 	if cerr := nc.isLive(cm); cerr != nil {
 		return nil, cerr
@@ -145,6 +146,8 @@ func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := nc.handleCINFO(cm); err != nil {
@@ -162,6 +165,18 @@ func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
 
 	return indata, nil
 }
+
+//// read returns data from the underline message list.
+//func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
+//	if cerr := nc.isLive(cm); cerr != nil {
+//		return nil, cerr
+//	}
+//
+//	atomic.AddInt64(&nc.totalReadMsgs, 1)
+//	indata, err := nc.parser.Next()
+//	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
+//	return indata, err
+//}
 
 func (nc *networkConn) getInfo(cm mnet.Client) mnet.Info {
 	var base mnet.Info

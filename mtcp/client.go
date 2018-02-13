@@ -360,6 +360,7 @@ func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
 		return nil, err
 	}
 
+	atomic.AddInt64(&cn.MessageRead, 1)
 	indata, err := cn.parser.Next()
 	atomic.AddInt64(&cn.totalRead, int64(len(indata)))
 	if err != nil {
@@ -372,10 +373,6 @@ func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
 		}
 		return nil, mnet.ErrNoDataYet
 	}
-
-	//if bytes.Equal(indata, rinfoBytes) {
-	//	return nil, mnet.ErrNoDataYet
-	//}
 
 	return indata, nil
 }
