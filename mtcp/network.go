@@ -48,9 +48,9 @@ type networkConn struct {
 	worker     sync.WaitGroup
 	do         sync.Once
 
-	maxWrite          int
-	maxDeadline       time.Duration
-	maxStreamDeadline time.Duration
+	maxWrite    int
+	maxDeadline time.Duration
+	maxInfoWait time.Duration
 
 	ready          int64
 	totalRead      int64
@@ -251,6 +251,73 @@ func (nc *networkConn) handleRINFO(data []byte) error {
 	info.Cluster = nc.isACluster
 	nc.srcInfo = &info
 	atomic.StoreInt64(&nc.ready, 1)
+	return nil
+}
+
+func (nc *networkConn) handshake(cm mnet.Client) error {
+	wc, err := nc.write(cm, len(cinfoBytes))
+	if err != nil {
+		return err
+	}
+
+	wc.Write(cinfoBytes)
+	wc.Close()
+	nc.flush(cm)
+
+	before := time.Now()
+
+	// Wait for info response.
+	for {
+		msg, err := nc.read(cm)
+		if err != nil {
+			if err != mnet.ErrNoDataYet {
+				return err
+			}
+
+			continue
+		}
+
+		if time.Now().Sub(before) > nc.maxInfoWait {
+			nc.closeConn(cm)
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		if err := nc.handleRINFO(msg); err != nil {
+			return err
+		}
+
+		break
+	}
+
+	if nc.isACluster {
+		if err := nc.handleCLStatusSend(cm); err != nil {
+			return err
+		}
+
+		// Wait for handshake completion.
+		for {
+			msg, err := nc.read(cm)
+			if err != nil {
+				if err != mnet.ErrNoDataYet {
+					return err
+				}
+
+				continue
+			}
+
+			if time.Now().Sub(before) > nc.maxInfoWait {
+				nc.closeConn(cm)
+				return mnet.ErrFailedToCompleteHandshake
+			}
+
+			if !bytes.Equal(msg, handshakeCompletedBytes) {
+				return mnet.ErrFailedToCompleteHandshake
+			}
+
+			break
+		}
+	}
+
 	return nil
 }
 
@@ -701,6 +768,7 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 	cn.metrics = n.Metrics
 	cn.serverAddr = n.raddr
 	cn.isACluster = isCluster
+	cn.maxInfoWait = n.MaxInfoWait
 	cn.localAddr = conn.LocalAddr()
 	cn.remoteAddr = conn.RemoteAddr()
 	cn.maxWrite = n.MaxWriteSize
@@ -728,64 +796,8 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 	n.clients[uuid] = cn
 	n.cu.Unlock()
 
-	if wc, err := cn.write(client, len(cinfoBytes)); err == nil {
-		wc.Write(cinfoBytes)
-		wc.Close()
-		cn.flush(client)
-	}
-
-	before := time.Now()
-
-	// Wait for info response.
-	for {
-		msg, err := cn.read(client)
-		if err != nil {
-			if err != mnet.ErrNoDataYet {
-				return err
-			}
-
-			continue
-		}
-
-		if time.Now().Sub(before) > n.MaxInfoWait {
-			client.Close()
-			return mnet.ErrFailedToRecieveInfo
-		}
-
-		if err := cn.handleRINFO(msg); err != nil {
-			return err
-		}
-
-		break
-	}
-
-	if isCluster {
-		if err := cn.handleCLStatusSend(client); err != nil {
-			return err
-		}
-
-		// Wait for handshake completion.
-		for {
-			msg, err := cn.read(client)
-			if err != nil {
-				if err != mnet.ErrNoDataYet {
-					return err
-				}
-
-				continue
-			}
-
-			if time.Now().Sub(before) > n.MaxInfoWait {
-				client.Close()
-				return mnet.ErrFailedToCompleteHandshake
-			}
-
-			if !bytes.Equal(msg, handshakeCompletedBytes) {
-				return mnet.ErrFailedToCompleteHandshake
-			}
-
-			break
-		}
+	if err := cn.handshake(client); err != nil {
+		return err
 	}
 
 	atomic.AddInt64(&n.totalClients, 1)
