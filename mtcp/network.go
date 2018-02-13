@@ -187,7 +187,6 @@ func (nc *networkConn) handleCLStatusReceive(cm mnet.Client, data []byte) error 
 		return err
 	}
 
-	info.Cluster = info.Cluster
 	nc.srcInfo = &info
 
 	wc, err := nc.write(cm, len(handshakeCompletedBytes))
@@ -266,7 +265,7 @@ func (nc *networkConn) handshake(cm mnet.Client) error {
 
 	before := time.Now()
 
-	// Wait for info response.
+	// Wait for CINFO response from connection.
 	for {
 		msg, err := nc.read(cm)
 		if err != nil {
@@ -289,12 +288,15 @@ func (nc *networkConn) handshake(cm mnet.Client) error {
 		break
 	}
 
+	// if its a cluster send Cluster Status message.
 	if nc.isACluster {
 		if err := nc.handleCLStatusSend(cm); err != nil {
 			return err
 		}
 
-		// Wait for handshake completion.
+		before = time.Now()
+
+		// Wait for handshake completion signal.
 		for {
 			msg, err := nc.read(cm)
 			if err != nil {
