@@ -62,7 +62,6 @@ type websocketServerClient struct {
 	waiter         sync.WaitGroup
 	wsReader       *wsutil.Reader
 	bu             sync.Mutex
-	header         []byte
 	wsWriter       *wsutil.Writer
 	cu             sync.Mutex
 	conn           net.Conn
@@ -110,13 +109,6 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 	conn = sc.conn
 	sc.cu.Unlock()
 
-	sc.bu.Lock()
-	if sc.wsWriter == nil {
-		sc.bu.Unlock()
-		return nil, mnet.ErrAlreadyClosed
-	}
-	sc.bu.Unlock()
-
 	return bufferPool.Get(size, func(d int, from io.WriterTo) error {
 		atomic.AddInt64(&sc.totalWriteMsgs, 1)
 		atomic.AddInt64(&sc.totalWritten, int64(d))
@@ -153,8 +145,9 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 		}
 
 		// write length header first.
-		binary.BigEndian.PutUint32(sc.header, uint32(d))
-		sc.wsWriter.Write(sc.header)
+		header := make([]byte, mnet.HeaderLength)
+		binary.BigEndian.PutUint32(header, uint32(d))
+		sc.wsWriter.Write(header)
 
 		// then flush data alongside header.
 		_, err := from.WriteTo(sc.wsWriter)
@@ -816,7 +809,6 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	client.localAddr = conn.LocalAddr()
 	client.remoteAddr = conn.RemoteAddr()
 	client.parser = new(internal.TaggedMessages)
-	client.header = make([]byte, mnet.HeaderLength)
 
 	defer n.Metrics.Emit(
 		metrics.Message("WebsocketNetwork.addClient: add new client"),
