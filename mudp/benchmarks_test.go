@@ -168,8 +168,8 @@ func benchThis(b *testing.B, payload []byte) {
 	netw.Wait()
 }
 
-func createBenchmarkNetwork(ctx context.Context, addr string) (*mudp.Network, error) {
-	var netw mudp.Network
+func createBenchmarkNetwork(ctx context.Context, addr string) (*mudp.UDPNetwork, error) {
+	var netw mudp.UDPNetwork
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.MaxWriteDeadline = 3 * time.Second

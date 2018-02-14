@@ -95,7 +95,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	//host, _, _ := net.SplitHostPort(addr)
 
 	network := new(clientConn)
-	network.netClient = new(netClient)
+	network.udpServerClient = new(udpServerClient)
 
 	for _, op := range ops {
 		op(network)
@@ -147,10 +147,10 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 }
 
 // clientConn implements the client side udp connection client.
-// It embeds the netClient and adds extra methods to provide client
+// It embeds the udpServerClient and adds extra methods to provide client
 // side behaviours.
 type clientConn struct {
-	*netClient
+	*udpServerClient
 	network     string
 	dialer      *net.Dialer
 	waiter      sync.WaitGroup
@@ -168,7 +168,7 @@ func (cn *clientConn) close(jn mnet.Client) error {
 		return mnet.ErrAlreadyClosed
 	}
 
-	err := cn.netClient.close(jn)
+	err := cn.udpServerClient.close(jn)
 	cn.waiter.Wait()
 	return err
 }
