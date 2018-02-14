@@ -434,14 +434,16 @@ func (cn *clientNetwork) close(cm mnet.Client) error {
 
 	cn.cu.Lock()
 	conn := cn.conn
-	cn.conn = nil
 	cn.cu.Unlock()
 
 	cn.do.Do(func() {
 		conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
+
+		cn.bu.Lock()
 		cn.buffWriter.Flush()
 		conn.SetWriteDeadline(time.Time{})
 		cn.buffWriter.Reset(cn.scratch)
+		cn.bu.Unlock()
 
 		conn.Close()
 	})
@@ -449,6 +451,10 @@ func (cn *clientNetwork) close(cm mnet.Client) error {
 	atomic.StoreInt64(&cn.closed, 1)
 
 	cn.worker.Wait()
+
+	cn.cu.Lock()
+	cn.conn = nil
+	cn.cu.Unlock()
 
 	return nil
 }
@@ -484,7 +490,9 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 
 	atomic.StoreInt64(&cn.closed, 0)
 
+	cn.bu.Lock()
 	cn.buffWriter.Reset(nil)
+	cn.bu.Unlock()
 
 	// if offline buffer has data written in, before new connection was started,
 	// meaning we have offline data, then first flush this in, then set up new connection as
@@ -497,10 +505,13 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	//	}
 	//}
 
+	cn.bu.Lock()
+	cn.buffWriter.Reset(conn)
+	cn.bu.Unlock()
+
 	cn.cu.Lock()
 	cn.do = sync.Once{}
 	cn.conn = conn
-	cn.buffWriter.Reset(conn)
 	cn.localAddr = conn.LocalAddr()
 	cn.remoteAddr = conn.RemoteAddr()
 	cn.cu.Unlock()
