@@ -123,7 +123,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	network.id = c.ID
 	network.addr = addr
 	network.hostname = host
-	network.header = make([]byte, mnet.HeaderLength)
 	if network.network == "" {
 		network.network = "udp"
 	}
