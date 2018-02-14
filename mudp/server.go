@@ -43,7 +43,7 @@ func (t targetConn) Write(d []byte) (int, error) {
 	return t.conn.WriteTo(d, t.target)
 }
 
-type netClient struct {
+type udpServerClient struct {
 	totalRead      int64
 	totalWritten   int64
 	totalFlushOut  int64
@@ -65,15 +65,15 @@ type netClient struct {
 	conn           *net.UDPConn
 }
 
-func (nc *netClient) getRemoteAddr(_ mnet.Client) (net.Addr, error) {
+func (nc *udpServerClient) getRemoteAddr(_ mnet.Client) (net.Addr, error) {
 	return nc.remoteAddr, nil
 }
 
-func (nc *netClient) getLocalAddr(_ mnet.Client) (net.Addr, error) {
+func (nc *udpServerClient) getLocalAddr(_ mnet.Client) (net.Addr, error) {
 	return nc.localAddr, nil
 }
 
-func (nc *netClient) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error) {
+func (nc *udpServerClient) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error) {
 	var stats mnet.ClientStatistic
 	stats.ID = nc.id
 	stats.Local = nc.localAddr
@@ -86,7 +86,7 @@ func (nc *netClient) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error) 
 	return stats, nil
 }
 
-//func (nc *netClient) stream(mn mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
+//func (nc *udpServerClient) stream(mn mnet.Client, id string, total int, chunk int) (io.WriteCloser, error) {
 //	if err := nc.isAlive(mn); err != nil {
 //		return nil, err
 //	}
@@ -94,7 +94,7 @@ func (nc *netClient) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error) 
 //	return internal.NewStreamWriter(mn, id, total, chunk), nil
 //}
 
-func (nc *netClient) write(mn mnet.Client, size int) (io.WriteCloser, error) {
+func (nc *udpServerClient) write(mn mnet.Client, size int) (io.WriteCloser, error) {
 	if err := nc.isAlive(mn); err != nil {
 		return nil, err
 	}
@@ -145,14 +145,14 @@ func (nc *netClient) write(mn mnet.Client, size int) (io.WriteCloser, error) {
 	}), nil
 }
 
-func (nc *netClient) isAlive(_ mnet.Client) error {
+func (nc *udpServerClient) isAlive(_ mnet.Client) error {
 	if atomic.LoadInt64(&nc.closedCounter) == 1 {
 		return mnet.ErrAlreadyClosed
 	}
 	return nil
 }
 
-func (nc *netClient) read(mn mnet.Client) ([]byte, error) {
+func (nc *udpServerClient) read(mn mnet.Client) ([]byte, error) {
 	if err := nc.isAlive(mn); err != nil {
 		return nil, err
 	}
@@ -162,7 +162,7 @@ func (nc *netClient) read(mn mnet.Client) ([]byte, error) {
 	return indata, err
 }
 
-func (nc *netClient) flush(mn mnet.Client) error {
+func (nc *udpServerClient) flush(mn mnet.Client) error {
 	if err := nc.isAlive(mn); err != nil {
 		return err
 	}
@@ -197,7 +197,7 @@ func (nc *netClient) flush(mn mnet.Client) error {
 	return nil
 }
 
-func (nc *netClient) close(mn mnet.Client) error {
+func (nc *udpServerClient) close(mn mnet.Client) error {
 	if err := nc.isAlive(mn); err != nil {
 		return err
 	}
@@ -231,7 +231,7 @@ func (nc *netClient) close(mn mnet.Client) error {
 	return conn.Close()
 }
 
-func (nc *netClient) handleMessage(data []byte) error {
+func (nc *udpServerClient) handleMessage(data []byte) error {
 	err := nc.parser.Parse(data)
 	if err == nil {
 		atomic.AddInt64(&nc.totalRead, int64(len(data)))
@@ -240,11 +240,11 @@ func (nc *netClient) handleMessage(data []byte) error {
 	return err
 }
 
-// Network defines a network which runs ontop of provided mnet.ConnHandler.
-type Network struct {
+// UDPNetwork defines a network which runs ontop of provided mnet.ConnHandler.
+type UDPNetwork struct {
 	ID                 string
 	Addr               string
-	Network            string
+	UDPNetwork         string
 	ServerName         string
 	Multicast          bool
 	MulticastInterface *net.Interface
@@ -271,12 +271,12 @@ type Network struct {
 	laddr   net.Addr
 	rung    sync.WaitGroup
 	cu      sync.RWMutex
-	clients map[string]*netClient
+	clients map[string]*udpServerClient
 	mu      sync.Mutex
 	conn    *net.UDPConn
 }
 
-func (n *Network) isAlive() error {
+func (n *UDPNetwork) isAlive() error {
 	if atomic.LoadInt64(&n.started) == 0 {
 		return errors.New("not started yet")
 	}
@@ -285,15 +285,15 @@ func (n *Network) isAlive() error {
 
 // Start boots up the server and initializes all internals to make
 // itself ready for servicing requests.
-func (n *Network) Start(ctx context.Context) error {
+func (n *UDPNetwork) Start(ctx context.Context) error {
 	if err := n.isAlive(); err == nil {
 		return err
 	}
 
-	n.clients = make(map[string]*netClient)
+	n.clients = make(map[string]*udpServerClient)
 
-	if n.Network == "" {
-		n.Network = "udp"
+	if n.UDPNetwork == "" {
+		n.UDPNetwork = "udp"
 	}
 
 	if n.Metrics == nil {
@@ -310,7 +310,7 @@ func (n *Network) Start(ctx context.Context) error {
 		n.ServerName = host
 	}
 
-	udpAddr, err := net.ResolveUDPAddr(n.Network, n.Addr)
+	udpAddr, err := net.ResolveUDPAddr(n.UDPNetwork, n.Addr)
 	if err != nil {
 		return err
 	}
@@ -319,9 +319,9 @@ func (n *Network) Start(ctx context.Context) error {
 
 	var serverConn *net.UDPConn
 	if n.Multicast && n.MulticastInterface != nil {
-		serverConn, err = net.ListenMulticastUDP(n.Network, n.MulticastInterface, n.addr)
+		serverConn, err = net.ListenMulticastUDP(n.UDPNetwork, n.MulticastInterface, n.addr)
 	} else {
-		serverConn, err = net.ListenUDP(n.Network, n.addr)
+		serverConn, err = net.ListenUDP(n.UDPNetwork, n.addr)
 	}
 
 	if err != nil {
@@ -350,18 +350,18 @@ func (n *Network) Start(ctx context.Context) error {
 	return nil
 }
 
-func (n *Network) handleCloseRequest(ctx context.Context, con *net.UDPConn) {
+func (n *UDPNetwork) handleCloseRequest(ctx context.Context, con *net.UDPConn) {
 	defer n.rung.Done()
 	<-ctx.Done()
 	con.Close()
 }
 
 // Wait blocks the call till all go-routines created by network has shutdown.
-func (n *Network) Wait() {
+func (n *UDPNetwork) Wait() {
 	n.rung.Wait()
 }
 
-func (n *Network) getAllClient(skipAddr net.Addr) []mnet.Client {
+func (n *UDPNetwork) getAllClient(skipAddr net.Addr) []mnet.Client {
 	n.cu.RLock()
 	defer n.cu.RUnlock()
 
@@ -393,13 +393,13 @@ func (n *Network) getAllClient(skipAddr net.Addr) []mnet.Client {
 }
 
 // addClient adds a new network connection into the network.
-func (n *Network) addClient(addr net.Addr, core *net.UDPConn, h mnet.ConnHandler) *netClient {
+func (n *UDPNetwork) addClient(addr net.Addr, core *net.UDPConn, h mnet.ConnHandler) *udpServerClient {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
 	client, ok := n.clients[addr.String()]
 	if !ok {
-		client = new(netClient)
+		client = new(udpServerClient)
 		client.nid = n.ID
 		client.conn = core
 		client.mainAddr = addr
@@ -453,7 +453,7 @@ func (n *Network) addClient(addr net.Addr, core *net.UDPConn, h mnet.ConnHandler
 	return client
 }
 
-func (n *Network) handleConnections(ctx context.Context, core *net.UDPConn) {
+func (n *UDPNetwork) handleConnections(ctx context.Context, core *net.UDPConn) {
 	defer n.rung.Done()
 	defer n.handleCloseConnections(ctx)
 
@@ -510,7 +510,7 @@ func (n *Network) handleConnections(ctx context.Context, core *net.UDPConn) {
 	}
 }
 
-func (n *Network) handleCloseConnections(ctx context.Context) {
+func (n *UDPNetwork) handleCloseConnections(ctx context.Context) {
 	n.cu.RLock()
 	for _, client := range n.clients {
 		atomic.StoreInt64(&client.closedCounter, 1)
@@ -518,12 +518,12 @@ func (n *Network) handleCloseConnections(ctx context.Context) {
 	n.cu.RUnlock()
 
 	n.cu.Lock()
-	n.clients = make(map[string]*netClient)
+	n.clients = make(map[string]*udpServerClient)
 	n.cu.Unlock()
 }
 
-// Statistics returns statics associated with Network.
-func (n *Network) Statistics() mnet.NetworkStatistic {
+// Statistics returns statics associated with UDPNetwork.
+func (n *UDPNetwork) Statistics() mnet.NetworkStatistic {
 	var stats mnet.NetworkStatistic
 	stats.ID = n.ID
 	stats.LocalAddr = n.laddr

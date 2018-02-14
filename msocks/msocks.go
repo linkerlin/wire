@@ -1,7 +1,9 @@
 package msocks
 
 import (
+	"bytes"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"net"
 	"strings"
@@ -112,7 +114,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	host, _, _ := net.SplitHostPort(addr)
 
 	network := new(socketClient)
-	network.socketConn = new(socketConn)
+	network.websocketServerClient = new(websocketServerClient)
 
 	for _, op := range ops {
 		op(network)
@@ -128,6 +130,10 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 
 	if network.metrics == nil {
 		network.metrics = metrics.New()
+	}
+
+	if network.maxInfoWait <= 0 {
+		network.maxInfoWait = mnet.MaxInfoWait
 	}
 
 	if network.maxWrite <= 0 {
@@ -152,12 +158,12 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.Metrics = network.metrics
 	c.CloseFunc = network.close
 	c.WriteFunc = network.write
-	//c.StreamFunc = network.stream
-	c.ReaderFunc = network.read
 	c.FlushFunc = network.flush
 	c.LiveFunc = network.isAlive
-	c.StatisticFunc = network.getStatistics
 	c.LiveFunc = network.isAlive
+	c.InfoFunc = network.getInfo
+	c.ReaderFunc = network.clientRead
+	c.StatisticFunc = network.getStatistics
 	c.LocalAddrFunc = network.getLocalAddr
 	c.RemoteAddrFunc = network.getRemoteAddr
 	c.ReconnectionFunc = network.reconnect
@@ -170,7 +176,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 }
 
 type socketClient struct {
-	*socketConn
+	*websocketServerClient
 	addr        string
 	hostname    string
 	secure      bool
@@ -186,12 +192,41 @@ func (cn *socketClient) isStarted() bool {
 	return atomic.LoadInt64(&cn.started) == 1
 }
 
+func (cn *socketClient) getInfo(cm mnet.Client) mnet.Info {
+	addr := cn.addr
+	if cn.remoteAddr != nil {
+		addr = cn.remoteAddr.String()
+	}
+
+	return mnet.Info{
+		ID:         cn.id,
+		ServerAddr: addr,
+	}
+}
+
+func (cn *socketClient) handleCINFO(cm mnet.Client) error {
+	jsn, err := json.Marshal(cn.getInfo(cm))
+	if err != nil {
+		return err
+	}
+
+	wc, err := cn.write(cm, len(jsn)+len(rinfoBytes))
+	if err != nil {
+		return err
+	}
+
+	wc.Write(rinfoBytes)
+	wc.Write(jsn)
+	wc.Close()
+	return cn.flush(cm)
+}
+
 func (cn *socketClient) close(jn mnet.Client) error {
 	if err := cn.isAlive(jn); err != nil {
 		return mnet.ErrAlreadyClosed
 	}
 
-	err := cn.socketConn.close(jn)
+	err := cn.websocketServerClient.close(jn)
 	cn.waiter.Wait()
 	return err
 }
@@ -246,7 +281,7 @@ func (cn *socketClient) reconnect(jn mnet.Client, addr string) error {
 	cn.waiter.Add(1)
 	go cn.readLoop(conn, reader)
 
-	return nil
+	return cn.respondToINFO(jn)
 }
 
 // getConn returns net.Conn for giving addr.
@@ -280,6 +315,31 @@ func (cn *socketClient) getConn(addr string) (net.Conn, error) {
 		break
 	}
 
-	cn.handshake = hs
+	cn.wshandshake = hs
 	return conn, err
+}
+
+func (cn *socketClient) respondToINFO(cm mnet.Client) error {
+	before := time.Now()
+
+	for {
+		msg, err := cn.parser.Next()
+		if err != nil {
+			if err != mnet.ErrNoDataYet {
+				return err
+			}
+
+			continue
+		}
+
+		if time.Now().Sub(before) > cn.maxInfoWait {
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		if !bytes.Equal(msg, cinfoBytes) {
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		return cn.handleCINFO(cm)
+	}
 }

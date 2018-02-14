@@ -52,7 +52,7 @@ func TestNetwork_Add(t *testing.T) {
 	tests.Passed("Should have successfully create network")
 
 	// Send net.Conn to be manage by another network manager for talks.
-	if err := netw2.AddCluster("localhost:4050", true); err != nil {
+	if err := netw2.AddCluster("localhost:4050"); err != nil {
 		tests.FailedWithError(err, "Should have successfully added net.Conn to network")
 	}
 	tests.Passed("Should have successfully added net.Conn to network")
@@ -137,13 +137,13 @@ func TestNetwork_ClusterConnect(t *testing.T) {
 	tests.Passed("Should have successfully create network")
 
 	// Should succesfully connect to cluster on localhost:4050
-	if err := netw2.AddCluster("localhost:4050", true); err != nil {
+	if err := netw2.AddCluster("localhost:4050"); err != nil {
 		tests.FailedWithError(err, "Should have successfully connect to cluster")
 	}
 	tests.Passed("Should have successfully connect to cluster")
 
 	// Should fail to connect to cluster on localhost:7050 since we are connected already.
-	if err := netw.AddCluster("localhost:7050", true); err == nil {
+	if err := netw.AddCluster("localhost:7050"); err == nil {
 		tests.Failed("Should have failed to connect to already connected cluster")
 	}
 	tests.Passed("Should have failed to connect to already connected cluster")
@@ -222,8 +222,8 @@ func createTLSCA() (ca certificates.CertificateAuthority, server, client certifi
 	return
 }
 
-func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.Network, error) {
-	var netw mtcp.Network
+func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.TCPNetwork, error) {
+	var netw mtcp.TCPNetwork
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.TLS = config
@@ -283,8 +283,8 @@ func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mt
 	return &netw, netw.Start(ctx)
 }
 
-func createInfoNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.Network, error) {
-	var netw mtcp.Network
+func createInfoNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.TCPNetwork, error) {
+	var netw mtcp.TCPNetwork
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.TLS = config

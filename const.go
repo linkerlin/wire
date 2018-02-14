@@ -33,13 +33,13 @@ const (
 
 	// MaxInfoWait sets the default duration to wait for arrival of connection info else
 	// closing the connection.
-	MaxInfoWait = time.Second * 5
+	MaxInfoWait = time.Second * 3
+
+	// MaxInfoWait sets the default time to sleep during a wait routine for the INFO response.
+	MaxInfoWaitSleep = time.Millisecond * 50
 
 	// MaxConnections sets a default maximum connection allowed for a giving network.
 	MaxConnections = 8000
-
-	// DefaultReconnectBufferSize sets the size of the buffer during reconnection.
-	DefaultReconnectBufferSize = 1024 * 1024 * 8
 
 	// HeaderLength defines the size of giving byte slice for message length header.
 	HeaderLength = 4

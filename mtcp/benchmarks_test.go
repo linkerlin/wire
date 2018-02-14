@@ -132,8 +132,8 @@ func benchThis(b *testing.B, payload []byte) {
 	netw.Wait()
 }
 
-func createBenchmarkNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.Network, error) {
-	var netw mtcp.Network
+func createBenchmarkNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.TCPNetwork, error) {
+	var netw mtcp.TCPNetwork
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.TLS = config

@@ -106,7 +106,11 @@ func benchThis(b *testing.B, payload []byte) {
 
 	netw.MaxWriteSize = defaultClientSize
 
-	client, err := msocks.Connect("localhost:5050", msocks.Metrics(events), msocks.MaxBuffer(defaultClientSize))
+	client, err := msocks.Connect("localhost:5050",
+		msocks.Metrics(events),
+		msocks.MaxBuffer(defaultClientSize),
+	)
+
 	if err != nil {
 		b.Fatalf("Failed to dial network %+q", err)
 		return
@@ -130,8 +134,8 @@ func benchThis(b *testing.B, payload []byte) {
 	netw.Wait()
 }
 
-func createBenchmarkNetwork(ctx context.Context, addr string) (*msocks.Network, error) {
-	var netw msocks.Network
+func createBenchmarkNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwork, error) {
+	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.MaxDeadline = 3 * time.Second

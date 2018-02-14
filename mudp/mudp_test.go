@@ -142,10 +142,10 @@ func TestUDPServerWithMUDPClient(t *testing.T) {
 	netw.Wait()
 }
 
-func createNewNetwork(ctx context.Context, addr string) (*mudp.Network, error) {
-	var netw mudp.Network
+func createNewNetwork(ctx context.Context, addr string) (*mudp.UDPNetwork, error) {
+	var netw mudp.UDPNetwork
 	netw.Addr = addr
-	netw.Network = "udp"
+	netw.UDPNetwork = "udp"
 	netw.Metrics = events
 	netw.MaxWriteDeadline = 3 * time.Second
 

@@ -3,6 +3,7 @@ package msocks_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -23,10 +24,14 @@ var (
 	dialer = &net.Dialer{Timeout: 2 * time.Second}
 )
 
-func TestWebsocketServerWithMWebsocketClient(t *testing.T) {
+func initMetrics() {
 	if testing.Verbose() {
 		events = metrics.New(custom.StackDisplay(os.Stderr))
 	}
+}
+
+func TestWebsocketServerWithMWebsocketClient(t *testing.T) {
+	initMetrics()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	netw, err := createNewNetwork(ctx, "localhost:4050")
@@ -92,8 +97,127 @@ func TestWebsocketServerWithMWebsocketClient(t *testing.T) {
 	netw.Wait()
 }
 
-func createNewNetwork(ctx context.Context, addr string) (*msocks.Network, error) {
-	var netw msocks.Network
+func TestNetwork_Add(t *testing.T) {
+	initMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	netw, err := createNewNetwork(ctx, "localhost:4050")
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully create network")
+	}
+	tests.Passed("Should have successfully create network")
+
+	netw2, err := createInfoNetwork(ctx, "localhost:7050")
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully created network")
+	}
+	tests.Passed("Should have successfully created network")
+
+	// Send net.Conn to be manage by another network manager for talks.
+	if err := netw2.AddCluster("localhost:4050"); err != nil {
+		tests.FailedWithError(err, "Should have successfully added net.Conn to network")
+	}
+	tests.Passed("Should have successfully added net.Conn to network")
+
+	client, err := msocks.Connect("localhost:7050", msocks.Metrics(events))
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully connected to network")
+	}
+	tests.Passed("Should have successfully connected to network")
+
+	payload := []byte("pub")
+	cw, err := client.Write(len(payload))
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully created new writer")
+	}
+	tests.Passed("Should have successfully created new writer")
+
+	cw.Write(payload)
+	if err := cw.Close(); err != nil {
+		tests.FailedWithError(err, "Should have successfully written payload to client")
+	}
+	tests.Passed("Should have successfully written payload to client")
+
+	if ferr := client.Flush(); ferr != nil {
+		tests.FailedWithError(ferr, "Should have successfully flush data to network")
+	}
+	tests.Passed("Should have successfully flush data to network")
+
+	var msg []byte
+	for {
+		msg, err = client.Read()
+		if err != nil {
+			if err == mnet.ErrNoDataYet {
+				err = nil
+				continue
+			}
+
+		}
+		break
+	}
+
+	client.Close()
+
+	var infos []mnet.Info
+	if err := json.Unmarshal(msg, &infos); err != nil {
+		tests.FailedWithError(err, "Should have successfully decoded response")
+	}
+	tests.Passed("Should have successfully decoded response")
+
+	cancel()
+	netw.Wait()
+	netw2.Wait()
+
+	if len(infos) != 2 {
+		tests.Failed("Should have received 2 info other to clients")
+	}
+	tests.Passed("Should have received 2 info other to clients")
+
+	cluster := infos[1]
+	if cluster.ServerAddr != "127.0.0.1:4050" {
+		tests.Failed("Should have matched cluster server to second mnet network")
+	}
+	tests.Passed("Should have matched cluster server to second mnet network")
+
+}
+
+func TestNetwork_ClusterConnect(t *testing.T) {
+	initMetrics()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	netw, err := createNewNetwork(ctx, "localhost:4050")
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully create network")
+	}
+	tests.Passed("Should have successfully create network")
+
+	netw2, err := createInfoNetwork(ctx, "localhost:7050")
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully create network")
+	}
+	tests.Passed("Should have successfully create network")
+
+	// Should succesfully connect to cluster on localhost:4050
+	if err := netw2.AddCluster("localhost:4050"); err != nil {
+		tests.FailedWithError(err, "Should have successfully connect to cluster")
+	}
+	tests.Passed("Should have successfully connect to cluster")
+
+	// Should fail to connect to cluster on localhost:7050 since we are connected already.
+	if err := netw.AddCluster("localhost:7050"); err == nil {
+		tests.Failed("Should have failed to connect to already connected cluster")
+	}
+	tests.Passed("Should have failed to connect to already connected cluster")
+
+	cancel()
+	netw.Wait()
+	netw2.Wait()
+}
+
+func createNewNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwork, error) {
+	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
 	netw.Metrics = events
 	netw.MaxDeadline = 3 * time.Second
@@ -138,6 +262,58 @@ func createNewNetwork(ctx context.Context, addr string) (*msocks.Network, error)
 
 				w.Write(res)
 				w.Close()
+			}
+
+			if err := client.Flush(); err != nil {
+				if err == io.ErrShortWrite {
+					continue
+				}
+
+				return err
+			}
+		}
+	}
+
+	return &netw, netw.Start(ctx)
+}
+
+func createInfoNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwork, error) {
+	var netw msocks.WebsocketNetwork
+	netw.Addr = addr
+	netw.Metrics = events
+	netw.MaxDeadline = 1 * time.Second
+
+	netw.Handler = func(client mnet.Client) error {
+		for {
+			_, err := client.Read()
+			if err != nil {
+				if err == mnet.ErrNoDataYet {
+					time.Sleep(300 * time.Millisecond)
+					continue
+				}
+
+				return err
+			}
+
+			var infos []mnet.Info
+			infos = append(infos, client.Info())
+			if others, err := client.Others(); err == nil {
+				for _, item := range others {
+					infos = append(infos, item.Info())
+				}
+
+				jsn, err := json.Marshal(infos)
+				if err != nil {
+					return err
+				}
+
+				wc, err := client.Write(len(jsn))
+				if err != nil {
+					return err
+				}
+
+				wc.Write(jsn)
+				wc.Close()
 			}
 
 			if err := client.Flush(); err != nil {

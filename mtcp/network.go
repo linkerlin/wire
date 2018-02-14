@@ -35,7 +35,11 @@ var (
 	bufferPool              = done.NewDonePool(218, 20)
 )
 
-type networkConn struct {
+//************************************************************************
+//  TCP client on Server Implementation
+//************************************************************************
+
+type tcpServerClient struct {
 	isACluster bool
 	nid        string
 	id         string
@@ -43,7 +47,7 @@ type networkConn struct {
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	srcInfo    *mnet.Info
-	network    *Network
+	network    *TCPNetwork
 	metrics    metrics.Metrics
 	worker     sync.WaitGroup
 	do         sync.Once
@@ -52,7 +56,6 @@ type networkConn struct {
 	maxDeadline time.Duration
 	maxInfoWait time.Duration
 
-	ready          int64
 	totalRead      int64
 	totalWritten   int64
 	totalFlushOut  int64
@@ -73,24 +76,19 @@ type networkConn struct {
 // isCluster returns true/false if a giving connection is actually
 // connected to another server i.e a server-to-server and not a
 // client-to-server connection.
-func (nc *networkConn) isCluster(cm mnet.Client) bool {
+func (nc *tcpServerClient) isCluster(cm mnet.Client) bool {
 	return nc.isACluster
 }
 
-// isReady returns an true/false if client is ready.
-func (nc *networkConn) isReady() bool {
-	return atomic.LoadInt64(&nc.ready) == 1
-}
-
 // isLive returns an error if networkconn is disconnected from network.
-func (nc *networkConn) isLive(cm mnet.Client) error {
+func (nc *tcpServerClient) isLive(cm mnet.Client) error {
 	if atomic.LoadInt64(&nc.closed) == 1 {
 		return mnet.ErrAlreadyClosed
 	}
 	return nil
 }
 
-func (nc *networkConn) getStatistics(cm mnet.Client) (mnet.ClientStatistic, error) {
+func (nc *tcpServerClient) getStatistics(cm mnet.Client) (mnet.ClientStatistic, error) {
 	var stats mnet.ClientStatistic
 	stats.ID = nc.id
 	stats.Local = nc.localAddr
@@ -103,7 +101,7 @@ func (nc *networkConn) getStatistics(cm mnet.Client) (mnet.ClientStatistic, erro
 	return stats, nil
 }
 
-func (nc *networkConn) flush(cm mnet.Client) error {
+func (nc *tcpServerClient) flush(cm mnet.Client) error {
 	if err := nc.isLive(cm); err != nil {
 		return err
 	}
@@ -134,8 +132,9 @@ func (nc *networkConn) flush(cm mnet.Client) error {
 }
 
 // read reads from incoming message handling necessary
-// handshake response and requests received over the wire.
-func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
+// handshake response and requests received over the wire,
+// while returning non-hanshake messages.
+func (nc *tcpServerClient) read(cm mnet.Client) ([]byte, error) {
 	if cerr := nc.isLive(cm); cerr != nil {
 		return nil, cerr
 	}
@@ -166,19 +165,7 @@ func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
 	return indata, nil
 }
 
-//// read returns data from the underline message list.
-//func (nc *networkConn) read(cm mnet.Client) ([]byte, error) {
-//	if cerr := nc.isLive(cm); cerr != nil {
-//		return nil, cerr
-//	}
-//
-//	atomic.AddInt64(&nc.totalReadMsgs, 1)
-//	indata, err := nc.parser.Next()
-//	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
-//	return indata, err
-//}
-
-func (nc *networkConn) getInfo(cm mnet.Client) mnet.Info {
+func (nc *tcpServerClient) getInfo(cm mnet.Client) mnet.Info {
 	var base mnet.Info
 	if nc.isCluster(cm) && nc.srcInfo != nil {
 		base = *nc.srcInfo
@@ -194,7 +181,7 @@ func (nc *networkConn) getInfo(cm mnet.Client) mnet.Info {
 	return base
 }
 
-func (nc *networkConn) handleCLStatusReceive(cm mnet.Client, data []byte) error {
+func (nc *tcpServerClient) handleCLStatusReceive(cm mnet.Client, data []byte) error {
 	data = bytes.TrimPrefix(data, clStatusBytes)
 
 	var info mnet.Info
@@ -214,7 +201,7 @@ func (nc *networkConn) handleCLStatusReceive(cm mnet.Client, data []byte) error 
 	return nc.flush(cm)
 }
 
-func (nc *networkConn) handleCLStatusSend(cm mnet.Client) error {
+func (nc *tcpServerClient) handleCLStatusSend(cm mnet.Client) error {
 	var info mnet.Info
 	info.Cluster = true
 	info.ServerNode = true
@@ -237,7 +224,7 @@ func (nc *networkConn) handleCLStatusSend(cm mnet.Client) error {
 	return nc.flush(cm)
 }
 
-func (nc *networkConn) handleCINFO(cm mnet.Client) error {
+func (nc *tcpServerClient) handleCINFO(cm mnet.Client) error {
 	jsn, err := json.Marshal(nc.getInfo(cm))
 	if err != nil {
 		return err
@@ -254,7 +241,7 @@ func (nc *networkConn) handleCINFO(cm mnet.Client) error {
 	return nc.flush(cm)
 }
 
-func (nc *networkConn) handleRINFO(data []byte) error {
+func (nc *tcpServerClient) handleRINFO(data []byte) error {
 	data = bytes.TrimPrefix(data, rinfoBytes)
 
 	var info mnet.Info
@@ -264,11 +251,11 @@ func (nc *networkConn) handleRINFO(data []byte) error {
 
 	info.Cluster = nc.isACluster
 	nc.srcInfo = &info
-	atomic.StoreInt64(&nc.ready, 1)
 	return nil
 }
 
-func (nc *networkConn) handshake(cm mnet.Client) error {
+func (nc *tcpServerClient) handshake(cm mnet.Client) error {
+	// Send to new client mnet.CINFO request
 	wc, err := nc.write(cm, len(cinfoBytes))
 	if err != nil {
 		return err
@@ -280,7 +267,7 @@ func (nc *networkConn) handshake(cm mnet.Client) error {
 
 	before := time.Now()
 
-	// Wait for CINFO response from connection.
+	// Wait for RCINFO response from connection.
 	for {
 		msg, err := nc.read(cm)
 		if err != nil {
@@ -288,10 +275,17 @@ func (nc *networkConn) handshake(cm mnet.Client) error {
 				return err
 			}
 
+			//time.Sleep(mnet.MaxInfoWaitSleep)
 			continue
 		}
 
 		if time.Now().Sub(before) > nc.maxInfoWait {
+			nc.closeConn(cm)
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		// First message should be a mnet.RCINFO response.
+		if !bytes.HasPrefix(msg, rinfoBytes) {
 			nc.closeConn(cm)
 			return mnet.ErrFailedToRecieveInfo
 		}
@@ -319,6 +313,7 @@ func (nc *networkConn) handshake(cm mnet.Client) error {
 					return err
 				}
 
+				//time.Sleep(mnet.MaxInfoWaitSleep)
 				continue
 			}
 
@@ -338,7 +333,7 @@ func (nc *networkConn) handshake(cm mnet.Client) error {
 	return nil
 }
 
-func (nc *networkConn) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
+func (nc *tcpServerClient) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
 	if err := nc.isLive(cm); err != nil {
 		return nil, err
 	}
@@ -393,7 +388,7 @@ func (nc *networkConn) write(cm mnet.Client, inSize int) (io.WriteCloser, error)
 	}), nil
 }
 
-func (nc *networkConn) closeConnection(cm mnet.Client) error {
+func (nc *tcpServerClient) closeConnection(cm mnet.Client) error {
 	if err := nc.isLive(cm); err != nil {
 		return err
 	}
@@ -401,7 +396,7 @@ func (nc *networkConn) closeConnection(cm mnet.Client) error {
 	defer nc.metrics.Emit(
 		metrics.WithID(nc.id),
 		metrics.With("network", nc.nid),
-		metrics.Message("networkConn.closeConnection"),
+		metrics.Message("tcpServerClient.closeConnection"),
 	)
 
 	atomic.StoreInt64(&nc.closed, 1)
@@ -445,21 +440,21 @@ func (nc *networkConn) closeConnection(cm mnet.Client) error {
 	return closeErr
 }
 
-func (nc *networkConn) getRemoteAddr(cm mnet.Client) (net.Addr, error) {
+func (nc *tcpServerClient) getRemoteAddr(cm mnet.Client) (net.Addr, error) {
 	return nc.remoteAddr, nil
 }
 
-func (nc *networkConn) getLocalAddr(cm mnet.Client) (net.Addr, error) {
+func (nc *tcpServerClient) getLocalAddr(cm mnet.Client) (net.Addr, error) {
 	return nc.localAddr, nil
 }
 
-func (nc *networkConn) closeConn(cm mnet.Client) error {
+func (nc *tcpServerClient) closeConn(cm mnet.Client) error {
 	return nc.closeConnection(cm)
 }
 
 // readLoop handles the necessary operation of reading data from the
 // underline connection.
-func (nc *networkConn) readLoop(cm mnet.Client) {
+func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 	defer nc.closeConnection(cm)
 	defer nc.worker.Done()
 
@@ -528,15 +523,12 @@ func (nc *networkConn) readLoop(cm mnet.Client) {
 	}
 }
 
-type networkAction func(*Network)
+//************************************************************************
+//  TCP Server Implementation
+//************************************************************************
 
-type netAddr struct {
-	Local  net.Addr
-	Remote net.Addr
-}
-
-// Network defines a network which runs ontop of provided mnet.ConnHandler.
-type Network struct {
+// TCPNetwork defines a network which runs ontop of provided mnet.ConnHandler.
+type TCPNetwork struct {
 	ID         string
 	Addr       string
 	ServerName string
@@ -545,7 +537,7 @@ type Network struct {
 	Metrics    metrics.Metrics
 
 	// Dialer to be used to create net.Conn to connect to cluster address
-	// in Network.AddCluster. Set to use a custom dialer.
+	// in TCPNetwork.AddCluster. Set to use a custom dialer.
 	Dialer *net.Dialer
 
 	totalClients int64
@@ -571,13 +563,13 @@ type Network struct {
 	raddr    net.Addr
 	pool     chan func()
 	cu       sync.RWMutex
-	clients  map[string]*networkConn
+	clients  map[string]*tcpServerClient
 	ctx      context.Context
 	routines sync.WaitGroup
 }
 
 // Start initializes the network listener.
-func (n *Network) Start(ctx context.Context) error {
+func (n *TCPNetwork) Start(ctx context.Context) error {
 	if n.Metrics == nil {
 		n.Metrics = metrics.New()
 	}
@@ -593,7 +585,7 @@ func (n *Network) Start(ctx context.Context) error {
 	}
 
 	defer n.Metrics.Emit(
-		metrics.Message("Network.Start"),
+		metrics.Message("TCPNetwork.Start"),
 		metrics.With("network", n.ID),
 		metrics.With("addr", n.Addr),
 		metrics.With("serverName", n.ServerName),
@@ -612,7 +604,7 @@ func (n *Network) Start(ctx context.Context) error {
 	//n.ctx = ctx
 	n.raddr = stream.Addr()
 	n.pool = make(chan func(), 0)
-	n.clients = make(map[string]*networkConn)
+	n.clients = make(map[string]*tcpServerClient)
 
 	if n.MaxWriteSize <= 0 {
 		n.MaxWriteSize = mnet.MaxBufferSize
@@ -637,7 +629,7 @@ func (n *Network) Start(ctx context.Context) error {
 	return nil
 }
 
-func (n *Network) handleClose(ctx context.Context, stream melon.ConnReadWriteCloser) {
+func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
 
 	<-ctx.Done()
@@ -653,7 +645,7 @@ func (n *Network) handleClose(ctx context.Context, stream melon.ConnReadWriteClo
 	if err := stream.Close(); err != nil {
 		n.Metrics.Emit(
 			metrics.Error(err),
-			metrics.Message("Network.endLogic"),
+			metrics.Message("TCPNetwork.endLogic"),
 			metrics.With("network", n.ID),
 			metrics.With("addr", n.Addr),
 			metrics.With("serverName", n.ServerName),
@@ -662,8 +654,8 @@ func (n *Network) handleClose(ctx context.Context, stream melon.ConnReadWriteClo
 	}
 }
 
-// Statistics returns statics associated with Network.
-func (n *Network) Statistics() mnet.NetworkStatistic {
+// Statistics returns statics associated with TCPNetwork.
+func (n *TCPNetwork) Statistics() mnet.NetworkStatistic {
 	var stats mnet.NetworkStatistic
 	stats.ID = n.ID
 	stats.LocalAddr = n.raddr
@@ -675,11 +667,11 @@ func (n *Network) Statistics() mnet.NetworkStatistic {
 }
 
 // Wait is called to ensure network ended.
-func (n *Network) Wait() {
+func (n *TCPNetwork) Wait() {
 	n.routines.Wait()
 }
 
-func (n *Network) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
+func (n *TCPNetwork) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
@@ -713,7 +705,7 @@ var defaultDialer = &net.Dialer{Timeout: 2 * time.Second}
 // AddCluster attempts to add new connection to another mnet tcp server.
 // It will attempt to dial specified address returning an error if the
 // giving address failed or was not able to meet the handshake protocols.
-func (n *Network) AddCluster(addr string, cluster bool) error {
+func (n *TCPNetwork) AddCluster(addr string) error {
 	var err error
 	var conn net.Conn
 
@@ -732,11 +724,11 @@ func (n *Network) AddCluster(addr string, cluster bool) error {
 		return mnet.ErrAlreadyServiced
 	}
 
-	return n.addClient(conn, cluster)
+	return n.addClient(conn, true)
 }
 
 // connectedToMe returns true/false if we are already connected to server.
-func (n *Network) connectedToMe(conn net.Conn) bool {
+func (n *TCPNetwork) connectedToMe(conn net.Conn) bool {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
@@ -754,14 +746,14 @@ func (n *Network) connectedToMe(conn net.Conn) bool {
 	return false
 }
 
-func (n *Network) addClient(conn net.Conn, isCluster bool) error {
+func (n *TCPNetwork) addClient(conn net.Conn, isCluster bool) error {
 	defer atomic.AddInt64(&n.totalOpened, -1)
 	defer atomic.AddInt64(&n.totalClosed, 1)
 
-	uuid := uuid.NewV4().String()
+	id := uuid.NewV4().String()
 
 	client := mnet.Client{
-		ID:      uuid,
+		ID:      id,
 		NID:     n.ID,
 		Metrics: n.Metrics,
 	}
@@ -769,7 +761,7 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 	n.Metrics.Emit(
 		metrics.WithID(n.ID),
 		metrics.With("network", n.ID),
-		metrics.With("client_id", uuid),
+		metrics.With("client_id", id),
 		metrics.With("network-addr", n.Addr),
 		metrics.With("serverName", n.ServerName),
 		metrics.Info("New Client Connection"),
@@ -777,8 +769,8 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 		metrics.With("remote_addr", conn.RemoteAddr()),
 	)
 
-	cn := new(networkConn)
-	cn.id = uuid
+	cn := new(tcpServerClient)
+	cn.id = id
 	cn.nid = n.ID
 	cn.conn = conn
 	cn.network = n
@@ -809,13 +801,13 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 	cn.worker.Add(1)
 	go cn.readLoop(client)
 
-	n.cu.Lock()
-	n.clients[uuid] = cn
-	n.cu.Unlock()
-
 	if err := cn.handshake(client); err != nil {
 		return err
 	}
+
+	n.cu.Lock()
+	n.clients[id] = cn
+	n.cu.Unlock()
 
 	atomic.AddInt64(&n.totalClients, 1)
 	go func() {
@@ -824,7 +816,7 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 		}
 
 		n.cu.Lock()
-		delete(n.clients, uuid)
+		delete(n.clients, id)
 		n.cu.Unlock()
 	}()
 
@@ -834,12 +826,12 @@ func (n *Network) addClient(conn net.Conn, isCluster bool) error {
 // runStream runs the process of listening for new connections and
 // creating appropriate client objects which will handle behaviours
 // appropriately.
-func (n *Network) runStream(stream melon.ConnReadWriteCloser) {
+func (n *TCPNetwork) runStream(stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
 
 	defer n.Metrics.Emit(
 		metrics.With("network", n.ID),
-		metrics.Message("Network.runStream"),
+		metrics.Message("TCPNetwork.runStream"),
 		metrics.With("addr", n.Addr),
 		metrics.With("serverName", n.ServerName),
 		metrics.WithID(n.ID),
