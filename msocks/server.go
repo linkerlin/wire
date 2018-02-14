@@ -695,14 +695,11 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 	var hs ws.Handshake
 	var conn net.Conn
 
-	// Set the tls config just incase we have one and need to use default dialer.
-	if n.Dialer == nil {
-		defaultDialer.TLSConfig = n.TLS
-	}
-
 	if n.Dialer != nil {
 		conn, _, hs, err = n.Dialer.Dial(context.Background(), addr)
 	} else {
+		// Set the tls config just incase we have one and need to use default dialer.
+		defaultDialer.TLSConfig = n.TLS
 		conn, _, hs, err = defaultDialer.Dial(context.Background(), addr)
 	}
 
