@@ -103,21 +103,19 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 
 	var conn net.Conn
 	sc.cu.Lock()
+	if sc.conn == nil {
+		sc.cu.Unlock()
+		return nil, mnet.ErrAlreadyClosed
+	}
 	conn = sc.conn
 	sc.cu.Unlock()
 
-	var writer *wsutil.Writer
 	sc.bu.Lock()
-	writer = sc.wsWriter
+	if sc.wsWriter == nil {
+		sc.bu.Unlock()
+		return nil, mnet.ErrAlreadyClosed
+	}
 	sc.bu.Unlock()
-
-	if conn == nil {
-		return nil, mnet.ErrAlreadyClosed
-	}
-
-	if writer == nil {
-		return nil, mnet.ErrAlreadyClosed
-	}
 
 	return bufferPool.Get(size, func(d int, from io.WriterTo) error {
 		atomic.AddInt64(&sc.totalWriteMsgs, 1)
@@ -126,7 +124,11 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 		sc.bu.Lock()
 		defer sc.bu.Unlock()
 
-		buffered := writer.Buffered()
+		if sc.wsWriter == nil {
+			return mnet.ErrAlreadyClosed
+		}
+
+		buffered := sc.wsWriter.Buffered()
 		atomic.AddInt64(&sc.totalFlushOut, int64(buffered))
 
 		// size of next write.
@@ -137,7 +139,7 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 
 		if toWrite >= sc.maxWrite {
 			conn.SetWriteDeadline(time.Now().Add(sc.maxDeadline))
-			if err := writer.Flush(); err != nil {
+			if err := sc.wsWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
 				sc.metrics.Emit(
 					metrics.Error(err),
@@ -152,10 +154,10 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 
 		// write length header first.
 		binary.BigEndian.PutUint32(sc.header, uint32(d))
-		writer.Write(sc.header)
+		sc.wsWriter.Write(sc.header)
 
 		// then flush data alongside header.
-		_, err := from.WriteTo(writer)
+		_, err := from.WriteTo(sc.wsWriter)
 		return err
 	}), nil
 }
@@ -233,22 +235,20 @@ func (sc *websocketServerClient) flush(mn mnet.Client) error {
 	conn = sc.conn
 	sc.cu.Unlock()
 
-	var writer *wsutil.Writer
-	sc.bu.Lock()
-	writer = sc.wsWriter
-	sc.bu.Unlock()
-
 	if conn == nil {
 		return mnet.ErrAlreadyClosed
 	}
 
-	if writer == nil {
+	sc.bu.Lock()
+	defer sc.bu.Unlock()
+
+	if sc.wsWriter == nil {
 		return mnet.ErrAlreadyClosed
 	}
 
-	if writer.Buffered() != 0 {
+	if sc.wsWriter.Buffered() != 0 {
 		conn.SetWriteDeadline(time.Now().Add(sc.maxDeadline))
-		if err := writer.Flush(); err != nil {
+		if err := sc.wsWriter.Flush(); err != nil {
 			conn.SetWriteDeadline(time.Time{})
 			sc.metrics.Emit(
 				metrics.Error(err),
@@ -271,38 +271,29 @@ func (sc *websocketServerClient) close(mn mnet.Client) error {
 
 	atomic.StoreInt64(&sc.closedCounter, 1)
 
-	var conn net.Conn
+	sc.flush(mn)
 
-	sc.cu.Lock()
-	conn = sc.conn
-	sc.conn = nil
-	sc.cu.Unlock()
-
-	if conn == nil {
-		return mnet.ErrAlreadyClosed
-	}
-
-	var writer *wsutil.Writer
 	sc.bu.Lock()
-	writer = sc.wsWriter
-	sc.wsWriter = nil
+	sc.wsWriter.Reset(nil, wsState, ws.OpBinary)
 	sc.bu.Unlock()
 
-	if writer.Buffered() != 0 {
-		conn.SetWriteDeadline(time.Now().Add(sc.maxDeadline))
-		writer.Flush()
-		conn.SetWriteDeadline(time.Time{})
-	}
-	writer.Reset(nil, wsState, ws.OpBinary)
-
+	var err error
 	sc.cu.Lock()
-	sc.wsWriter = nil
-	sc.wsReader = nil
+	if sc.conn != nil {
+		err = sc.conn.Close()
+	}
 	sc.cu.Unlock()
 
-	err := conn.Close()
-
 	sc.waiter.Wait()
+
+	sc.bu.Lock()
+	sc.wsWriter = nil
+	sc.wsReader = nil
+	sc.bu.Unlock()
+
+	sc.cu.Lock()
+	sc.conn = nil
+	sc.cu.Unlock()
 
 	return err
 }
