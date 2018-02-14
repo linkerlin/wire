@@ -639,6 +639,10 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 		n.TLS.ServerName = n.ServerName
 	}
 
+	if n.Dialer != nil && n.Dialer.TLSConfig == nil {
+		n.Dialer.TLSConfig = n.TLS
+	}
+
 	stream, err := mlisten.Listen("tcp", n.Addr, n.TLS)
 	if err != nil {
 		return err
@@ -679,8 +683,6 @@ var defaultDialer = &ws.Dialer{
 	WriteBufferSize: wsWriteBuffer,
 }
 
-//var netDefDialer = &net.Dialer{Timeout: 2 * time.Second}
-
 // AddCluster attempts to add new connection to another mnet tcp server.
 // It will attempt to dial specified address returning an error if the
 // giving address failed or was not able to meet the handshake protocols.
@@ -692,6 +694,11 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 	var err error
 	var hs ws.Handshake
 	var conn net.Conn
+
+	// Set the tls config just incase we have one and need to use default dialer.
+	if n.Dialer == nil {
+		defaultDialer.TLSConfig = n.TLS
+	}
 
 	if n.Dialer != nil {
 		conn, _, hs, err = n.Dialer.Dial(context.Background(), addr)
