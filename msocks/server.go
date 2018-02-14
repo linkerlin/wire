@@ -573,6 +573,14 @@ type WebsocketNetwork struct {
 	// in TCPNetwork.AddCluster. Set to use a custom dialer.
 	Dialer *ws.Dialer
 
+	// MaxClusterRetries specifies allowed max retries used by the
+	// RetryPolicy for reconnecting to a disconnected cluster network.
+	MaxClusterRetries int
+
+	// ClusterRetryDelay defines the duration used to expand for
+	// each retry of reconnecting to a cluster address.
+	ClusterRetryDelay time.Duration
+
 	// MaxConnection defines the total allowed connections for
 	// giving network.
 	MaxConnections int
@@ -655,6 +663,14 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 		n.MaxConnections = mnet.MaxConnections
 	}
 
+	if n.MaxClusterRetries <= 0 {
+		n.MaxClusterRetries = mnet.MaxReconnectRetries
+	}
+
+	if n.ClusterRetryDelay <= 0 {
+		n.ClusterRetryDelay = mnet.DefaultClusterRetryDelay
+	}
+
 	if n.MaxInfoWait <= 0 {
 		n.MaxInfoWait = mnet.MaxInfoWait
 	}
@@ -688,7 +704,11 @@ var defaultDialer = &ws.Dialer{
 // giving address failed or was not able to meet the handshake protocols.
 func (n *WebsocketNetwork) AddCluster(addr string) error {
 	if !strings.HasPrefix(addr, "ws://") && !strings.HasPrefix(addr, "wss://") {
-		addr = "ws://" + addr
+		if n.TLS == nil {
+			addr = "ws://" + addr
+		} else {
+			addr = "wss://" + addr
+		}
 	}
 
 	var err error
@@ -712,7 +732,11 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		return mnet.ErrAlreadyServiced
 	}
 
-	return n.addWSClient(conn, hs, true)
+	policy := mnet.FunctionPolicy(n.MaxClusterRetries, func() error {
+		return n.AddCluster(addr)
+	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
+
+	return n.addWSClient(conn, hs, policy, true)
 }
 
 // connectedToMe returns true/false if we are already connected to server.
@@ -736,7 +760,7 @@ func (n *WebsocketNetwork) connectedToMe(conn net.Conn) bool {
 
 // AddClient adds a new websocket client through the provided
 // net.Conn.
-func (n *WebsocketNetwork) addClient(newConn net.Conn, isCluster bool) error {
+func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, isCluster bool) error {
 	handshake, err := n.Upgrader.Upgrade(newConn)
 	if err != nil {
 		n.Metrics.Send(metrics.Entry{
@@ -762,7 +786,7 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, isCluster bool) error {
 		},
 	})
 
-	if err := n.addWSClient(newConn, handshake, isCluster); err != nil {
+	if err := n.addWSClient(newConn, handshake, policy, isCluster); err != nil {
 		newConn.Close()
 		return err
 	}
@@ -770,7 +794,7 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, isCluster bool) error {
 	return nil
 }
 
-func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, isCluster bool) error {
+func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mnet.RetryPolicy, isCluster bool) error {
 	atomic.AddInt64(&n.totalClients, 1)
 	atomic.AddInt64(&n.totalOpened, 1)
 
@@ -861,6 +885,20 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, isCluster
 		n.cu.Lock()
 		delete(n.clients, client.id)
 		n.cu.Unlock()
+
+		if policy != nil {
+			go func() {
+				if err := policy.Retry(); err != nil {
+					n.Metrics.Emit(
+						metrics.Error(err),
+						metrics.With("addr", addr),
+						metrics.WithID(mclient.ID),
+						metrics.With("network", n.ID),
+						metrics.Message("RetryPolicy failed"),
+					)
+				}
+			}()
+		}
 	}(mclient, client.remoteAddr)
 
 	return nil
@@ -946,7 +984,7 @@ func (n *WebsocketNetwork) handleConnections(ctx context.Context, stream melon.C
 			continue
 		}
 
-		n.addClient(newConn, false)
+		n.addClient(newConn, nil, false)
 	}
 }
 

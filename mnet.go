@@ -3,10 +3,111 @@ package mnet
 import (
 	"errors"
 	"io"
+	"math"
 	"net"
+	"time"
 
 	"github.com/influx6/faux/metrics"
 )
+
+// errors ...
+var (
+	ErrNotSupported                  = errors.New("feature not supported")
+	ErrStreamerClosed                = errors.New("data stream writer is closed")
+	ErrClientAlreadyExists           = errors.New("client with id exists")
+	ErrFailedToRecieveInfo           = errors.New("failed to receive info")
+	ErrFailedToCompleteHandshake     = errors.New("failed to complete handshake")
+	ErrNoDataYet                     = errors.New("data is not yet available for reading")
+	ErrAlreadyClosed                 = errors.New("already closed connection")
+	ErrReadNotAllowed                = errors.New("reading not allowed")
+	ErrLiveCheckNotAllowed           = errors.New("live status not allowed or supported")
+	ErrWriteNotAllowed               = errors.New("data writing not allowed")
+	ErrNoClusterServicing            = errors.New("cluster connections not servicable")
+	ErrAlreadyServiced               = errors.New("cluster connections already serviced")
+	ErrNoHostNameInAddr              = errors.New("addr must have hostname")
+	ErrStillConnected                = errors.New("connection still active")
+	ErrReadFromNotAllowed            = errors.New("reading from a addr not allowed")
+	ErrWriteToAddrNotAllowed         = errors.New("data writing to a addr not allowed")
+	ErrFlushToAddrNotAllowed         = errors.New("write flushing to target addr not allowed")
+	ErrBufferExpansionNotAllowed     = errors.New("buffer expansion not allowed")
+	ErrCloseNotAllowed               = errors.New("closing not allowed")
+	ErrFlushNotAllowed               = errors.New("write flushing not allowed")
+	ErrSiblingsNotAllowed            = errors.New("siblings retrieval not allowed")
+	ErrStatisticsNotProvided         = errors.New("statistics not provided")
+	ErrAddrNotProvided               = errors.New("net.Addr is not provided")
+	ErrClientReconnectionUnavailable = errors.New("client reconnection not available")
+)
+
+//************************************************************************
+// RetryPolicy interface and Implementation
+//************************************************************************
+
+// RetryPolicy defines a interface which exposes a single method which is
+// called to perform a giving action until some criteria is met or the
+// conditions for possible retries is become invalid thereby returning an
+// error.
+type RetryPolicy interface {
+	Retry() error
+}
+
+// RetryAction defines a function type which called would return an error
+// if it's internal operation or state fails.
+type RetryAction func() error
+
+// DelayJudge defines a function which takes a giving count value
+// returning a time.Duration usable to wait before attempting a
+// another call.
+type DelayJudge func(int) time.Duration
+
+// FunctionRetryPolicy returns a new RetryPolicy which uses provided function
+// to retry said actions till no error is received or till we max out possible
+// allowed retries.
+func FunctionPolicy(max int, action RetryAction, delay DelayJudge) RetryPolicy {
+	return &fnRetryPolicy{
+		delay:  delay,
+		action: action,
+		max:    max,
+	}
+}
+
+type fnRetryPolicy struct {
+	max    int
+	now    int
+	delay  DelayJudge
+	action RetryAction
+}
+
+// Retry attempts to run giving action until success or else
+// will attempt to generate continuous longer sleep durations
+// to wait before next try. If it has expired all possible tries
+// then it stops, else will exhaust all possible tries.
+func (fn *fnRetryPolicy) Retry() error {
+	if fn.now >= fn.max {
+		return errors.New("already expired")
+	}
+
+	for {
+		fn.now++
+		if nextDelay := fn.delay(fn.now); nextDelay > 0 {
+			time.Sleep(nextDelay)
+		}
+
+		if err := fn.action(); err == nil {
+			fn.now = 0
+			return nil
+		}
+	}
+	return errors.New("expired retries")
+}
+
+// ExponentialDelay returns a DelayJudge which for every giving time
+// will expand it's next duration by the provided exampnd value times
+// an exponential calculation of the current try value.
+func ExponentialDelay(expand time.Duration) DelayJudge {
+	return func(i int) time.Duration {
+		return time.Duration(math.Exp2(float64(i))) * expand
+	}
+}
 
 //*************************************************************************
 // Method Function types
@@ -55,62 +156,6 @@ type ReconnectionFunc func(Client, string) error
 // StatisticsFunc defines a function type which returns a Statistics
 // structs related to the user.
 type StatisticsFunc func(Client) (ClientStatistic, error)
-
-// errors ...
-var (
-	ErrNotSupported                  = errors.New("feature not supported")
-	ErrStreamerClosed                = errors.New("data stream writer is closed")
-	ErrClientAlreadyExists           = errors.New("client with id exists")
-	ErrFailedToRecieveInfo           = errors.New("failed to receive info")
-	ErrFailedToCompleteHandshake     = errors.New("failed to complete handshake")
-	ErrNoDataYet                     = errors.New("data is not yet available for reading")
-	ErrAlreadyClosed                 = errors.New("already closed connection")
-	ErrReadNotAllowed                = errors.New("reading not allowed")
-	ErrLiveCheckNotAllowed           = errors.New("live status not allowed or supported")
-	ErrWriteNotAllowed               = errors.New("data writing not allowed")
-	ErrNoClusterServicing            = errors.New("cluster connections not servicable")
-	ErrAlreadyServiced               = errors.New("cluster connections already serviced")
-	ErrNoHostNameInAddr              = errors.New("addr must have hostname")
-	ErrStillConnected                = errors.New("connection still active")
-	ErrReadFromNotAllowed            = errors.New("reading from a addr not allowed")
-	ErrWriteToAddrNotAllowed         = errors.New("data writing to a addr not allowed")
-	ErrFlushToAddrNotAllowed         = errors.New("write flushing to target addr not allowed")
-	ErrBufferExpansionNotAllowed     = errors.New("buffer expansion not allowed")
-	ErrCloseNotAllowed               = errors.New("closing not allowed")
-	ErrFlushNotAllowed               = errors.New("write flushing not allowed")
-	ErrSiblingsNotAllowed            = errors.New("siblings retrieval not allowed")
-	ErrStatisticsNotProvided         = errors.New("statistics not provided")
-	ErrAddrNotProvided               = errors.New("net.Addr is not provided")
-	ErrClientReconnectionUnavailable = errors.New("client reconnection not available")
-)
-
-//*************************************************************************
-// Stream Type and Interface
-//*************************************************************************
-
-// Part embodies  offset information for a giving data stream.
-type Part struct {
-	Begin int64
-	End   int64
-}
-
-// Meta embodies meta data used to contain data related to
-// a stream.
-type Meta struct {
-	Chunk int64
-	Total int64
-	Id    string
-	Parts []Part
-}
-
-// StreamReader defines an interface type which exposes a read method
-// that returns a data with associated meta information if it was
-// streamed as collective chunks over the wire, else returning
-// an error if any occured or ErrNoDataYet, if no data is
-// currently available.
-type StreamReader interface {
-	Read() ([]byte, *Meta, error)
-}
 
 //*************************************************************************
 // Network and Client Stats
@@ -402,4 +447,32 @@ func (c Client) Others() ([]Client, error) {
 	}
 
 	return c.SiblingsFunc(c)
+}
+
+//*************************************************************************
+// Stream Type and Interface
+//*************************************************************************
+
+// Part embodies  offset information for a giving data stream.
+type Part struct {
+	Begin int64
+	End   int64
+}
+
+// Meta embodies meta data used to contain data related to
+// a stream.
+type Meta struct {
+	Chunk int64
+	Total int64
+	Id    string
+	Parts []Part
+}
+
+// StreamReader defines an interface type which exposes a read method
+// that returns a data with associated meta information if it was
+// streamed as collective chunks over the wire, else returning
+// an error if any occured or ErrNoDataYet, if no data is
+// currently available.
+type StreamReader interface {
+	Read() ([]byte, *Meta, error)
 }

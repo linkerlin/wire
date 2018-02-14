@@ -549,6 +549,14 @@ type TCPNetwork struct {
 	// giving network.
 	MaxConnections int
 
+	// MaxClusterRetries specifies allowed max retries used by the
+	// RetryPolicy for reconnecting to a disconnected cluster network.
+	MaxClusterRetries int
+
+	// ClusterRetryDelay defines the duration used to expand for
+	// each retry of reconnecting to a cluster address.
+	ClusterRetryDelay time.Duration
+
 	// MaxInfoWait defines the maximum duration allowed for a
 	// waiting for MNET:CINFO response.
 	MaxInfoWait time.Duration
@@ -612,6 +620,14 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 
 	if n.MaxConnections <= 0 {
 		n.MaxConnections = mnet.MaxConnections
+	}
+
+	if n.MaxClusterRetries <= 0 {
+		n.MaxClusterRetries = mnet.MaxReconnectRetries
+	}
+
+	if n.ClusterRetryDelay <= 0 {
+		n.ClusterRetryDelay = mnet.DefaultClusterRetryDelay
 	}
 
 	if n.MaxInfoWait <= 0 {
@@ -724,7 +740,11 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 		return mnet.ErrAlreadyServiced
 	}
 
-	return n.addClient(conn, true)
+	policy := mnet.FunctionPolicy(n.MaxClusterRetries, func() error {
+		return n.AddCluster(addr)
+	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
+
+	return n.addClient(conn, policy, true)
 }
 
 // connectedToMe returns true/false if we are already connected to server.
@@ -746,7 +766,7 @@ func (n *TCPNetwork) connectedToMe(conn net.Conn) bool {
 	return false
 }
 
-func (n *TCPNetwork) addClient(conn net.Conn, isCluster bool) error {
+func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster bool) error {
 	defer atomic.AddInt64(&n.totalOpened, -1)
 	defer atomic.AddInt64(&n.totalClosed, 1)
 
@@ -813,11 +833,32 @@ func (n *TCPNetwork) addClient(conn net.Conn, isCluster bool) error {
 	go func() {
 		if err := n.Handler(client); err != nil {
 			client.Close()
+			n.Metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("network", n.ID),
+				metrics.With("addr", cn.remoteAddr),
+				metrics.Message("Connection closing"),
+			)
 		}
 
 		n.cu.Lock()
 		delete(n.clients, id)
 		n.cu.Unlock()
+
+		if policy != nil {
+			go func() {
+				if err := policy.Retry(); err != nil {
+					n.Metrics.Emit(
+						metrics.Error(err),
+						metrics.WithID(cn.id),
+						metrics.With("network", n.ID),
+						metrics.With("addr", cn.remoteAddr),
+						metrics.Message("RetryPolicy failed"),
+					)
+				}
+			}()
+		}
 	}()
 
 	return nil
@@ -877,7 +918,7 @@ func (n *TCPNetwork) runStream(stream melon.ConnReadWriteCloser) {
 
 		atomic.AddInt64(&n.totalClients, 1)
 		atomic.AddInt64(&n.totalOpened, 1)
-		n.addClient(newConn, false)
+		n.addClient(newConn, nil, false)
 	}
 }
 

@@ -31,6 +31,14 @@ const (
 	// during no-use. It is used by net.Dialer.
 	DefaultKeepAlive = 3 * time.Minute
 
+	// DefaultClusterRetryDelay defines the default initial delay used for reconnecting
+	// to a cluster address.
+	DefaultClusterRetryDelay = 300 * time.Millisecond
+
+	// MaxReconnectRetries defines the maximum retries allowed to reconnect to
+	// a cluster.
+	MaxReconnectRetries = 10
+
 	// MaxInfoWait sets the default duration to wait for arrival of connection info else
 	// closing the connection.
 	MaxInfoWait = time.Second * 3
