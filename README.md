@@ -49,5 +49,5 @@ Msocks like all Mnet packages are foundation, in that they lay the necessary fou
 2. Make your changes with clear git commit messages.
 3. Create a PR request with detail reason for change.
 
-Do reach out anything, if PR takes time for review. :)
+Do reach out anytime, if PR takes time for review. :)
 
