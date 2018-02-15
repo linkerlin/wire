@@ -374,6 +374,13 @@ func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := cn.handleCINFO(cm); err != nil {
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.Message("handleCINFO failed"),
+			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -399,41 +406,68 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 			return
 		}
 
+		cn.metrics.Emit(
+			metrics.WithID(cn.id),
+			metrics.With("network", cn.nid),
+			metrics.With("length", nn),
+			metrics.With("data", string(incoming[:nn])),
+			metrics.Message("received new message"),
+		)
 		atomic.AddInt64(&cn.totalRead, int64(nn))
 
 		// if we fail to parse the data then we error out.
 		if err := cn.parser.Parse(incoming[:nn]); err != nil {
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("network", cn.nid),
+				metrics.With("length", nn),
+				metrics.With("data", string(incoming[:nn])),
+				metrics.Message("Parser: failed to parse data"),
+			)
 			return
 		}
 
 		// Lets resize buffer within area.
-		if nn == len(incoming) && nn < mnet.MaxBufferSize {
+		//if nn < mnet.MinBufferSize && nn < mnet.MinBufferSize/2 {
+		//	incoming = make([]byte, mnet.MinBufferSize/2, mnet.MinBufferSize)
+		//	continue
+		//}
+
+		if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
 			incoming = make([]byte, mnet.MinBufferSize*2)
+			continue
 		}
 
-		if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
-			incoming = make([]byte, len(incoming)/2)
-		}
-
-		if nn > mnet.MinBufferSize && nn < cn.clientMaxWriteSize {
+		if nn > mnet.MinBufferSize && nn <= cn.clientMaxWriteSize/2 {
 			incoming = make([]byte, cn.clientMaxWriteSize/2)
+			continue
 		}
 
-		if nn > mnet.MinBufferSize && nn >= cn.clientMaxWriteSize {
+		if nn > mnet.MinBufferSize && nn >= cn.clientMaxWriteSize/2 {
 			incoming = make([]byte, cn.clientMaxWriteSize)
+			continue
 		}
+
+		incoming = make([]byte, mnet.MinBufferSize)
 	}
 }
 
 func (cn *clientNetwork) close(cm mnet.Client) error {
 	if err := cn.isLive(cm); err != nil {
+		cn.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(cn.id),
+			metrics.With("network", cn.nid),
+			metrics.Message("clientNetwork.close: Closed connection"),
+		)
 		return err
 	}
 
 	cn.metrics.Emit(
 		metrics.WithID(cn.id),
 		metrics.With("network", cn.nid),
-		metrics.Message("clientNetwork.close"),
+		metrics.Message("clientNetwork.close: Closing connection"),
 	)
 
 	cn.flush(cm)

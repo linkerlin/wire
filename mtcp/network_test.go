@@ -94,14 +94,14 @@ func TestNetwork_Add(t *testing.T) {
 		break
 	}
 
-	client.Close()
-
 	var infos []mnet.Info
 	if err := json.Unmarshal(msg, &infos); err != nil {
+		tests.Info("Received: %+q\n", msg)
 		tests.FailedWithError(err, "Should have successfully decoded response")
 	}
 	tests.Passed("Should have successfully decoded response")
 
+	client.Close()
 	cancel()
 	netw.Wait()
 	netw2.Wait()

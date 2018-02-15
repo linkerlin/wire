@@ -203,6 +203,13 @@ func (sc *websocketServerClient) serverRead(cm mnet.Client) ([]byte, error) {
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := sc.handleCINFO(cm); err != nil {
+			sc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(sc.id),
+				metrics.With("client", sc.id),
+				metrics.With("network", sc.nid),
+				metrics.Message("handleCINFO failed"),
+			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -210,6 +217,13 @@ func (sc *websocketServerClient) serverRead(cm mnet.Client) ([]byte, error) {
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
 		if err := sc.handleCLStatusReceive(cm, indata); err != nil {
+			sc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(sc.id),
+				metrics.With("client", sc.id),
+				metrics.With("network", sc.nid),
+				metrics.Message("handleCLStatusRecieve failed"),
+			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -259,16 +273,30 @@ func (sc *websocketServerClient) flush(mn mnet.Client) error {
 
 func (sc *websocketServerClient) close(mn mnet.Client) error {
 	if err := sc.isAlive(mn); err != nil {
+		sc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(sc.id),
+			metrics.With("client", sc.id),
+			metrics.With("network", sc.nid),
+			metrics.Message("Closing websocket node connection"),
+		)
 		return err
 	}
+
+	sc.metrics.Emit(
+		metrics.WithID(sc.id),
+		metrics.With("client", sc.id),
+		metrics.With("network", sc.nid),
+		metrics.Message("Closing websocket node connection"),
+	)
 
 	atomic.StoreInt64(&sc.closedCounter, 1)
 
 	sc.flush(mn)
 
-	sc.bu.Lock()
-	sc.wsWriter.Reset(nil, wsState, ws.OpBinary)
-	sc.bu.Unlock()
+	//sc.bu.Lock()
+	//sc.wsWriter.Reset(nil, wsState, ws.OpBinary)
+	//sc.bu.Unlock()
 
 	var err error
 	sc.cu.Lock()
@@ -287,6 +315,16 @@ func (sc *websocketServerClient) close(mn mnet.Client) error {
 	sc.cu.Lock()
 	sc.conn = nil
 	sc.cu.Unlock()
+
+	if err != nil {
+		sc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(sc.id),
+			metrics.With("client", sc.id),
+			metrics.With("network", sc.nid),
+			metrics.Message("Closed websocket net.Conn connection"),
+		)
+	}
 
 	return err
 }
@@ -312,7 +350,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			return
 		}
 
-		if int(frame.Length) > len(incoming) && int(frame.Length) > mnet.MinBufferSize {
+		if int(frame.Length) > len(incoming) && int(frame.Length) > len(incoming) {
 			incoming = make([]byte, frame.Length)
 		}
 
@@ -341,6 +379,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
+				metrics.With("message", string(incoming[:nn])),
 				metrics.Message("Connection failed to read: closing"),
 				metrics.With("network", sc.nid),
 			)
@@ -348,21 +387,27 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 		}
 
 		// Lets resize buffer within area.
-		if nn == len(incoming) && nn < mnet.MaxBufferSize {
+		//if nn < mnet.MinBufferSize {
+		//	incoming = make([]byte, mnet.MinBufferSize/2)
+		//	continue
+		//}
+
+		if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
 			incoming = make([]byte, mnet.MinBufferSize*2)
+			continue
 		}
 
-		if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
-			incoming = make([]byte, len(incoming)/2)
-		}
-
-		if nn > mnet.MinBufferSize && nn < sc.maxWrite {
+		if nn > mnet.MinBufferSize && nn <= sc.maxWrite/2 {
 			incoming = make([]byte, sc.maxWrite/2)
+			continue
 		}
 
-		if nn > mnet.MinBufferSize && nn >= sc.maxWrite {
+		if nn > mnet.MinBufferSize && nn >= sc.maxWrite/2 {
 			incoming = make([]byte, sc.maxWrite)
+			continue
 		}
+
+		incoming = make([]byte, mnet.MinBufferSize)
 	}
 }
 
@@ -478,22 +523,44 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 				return err
 			}
 
-			//time.Sleep(mnet.MaxInfoWaitSleep)
 			continue
 		}
 
 		if time.Now().Sub(before) > sc.maxInfoWait {
 			sc.close(cm)
+			sc.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(sc.id),
+				metrics.With("client", sc.id),
+				metrics.With("network", sc.nid),
+				metrics.Message("Timeout: awaiting mnet.RCINFo data"),
+			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		// First message should be a mnet.RCINFO response.
 		if !bytes.HasPrefix(msg, rinfoBytes) {
 			sc.close(cm)
+			sc.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(sc.id),
+				metrics.With("client", sc.id),
+				metrics.With("network", sc.nid),
+				metrics.With("data", string(msg)),
+				metrics.Message("Invalid mnet.RCINFO prefix"),
+			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		if err := sc.handleRINFO(msg); err != nil {
+			sc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(sc.id),
+				metrics.With("client", sc.id),
+				metrics.With("network", sc.nid),
+				metrics.With("data", string(msg)),
+				metrics.Message("Invalid mnet.RCINFO data"),
+			)
 			return err
 		}
 
@@ -516,16 +583,30 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 					return err
 				}
 
-				//time.Sleep(mnet.MaxInfoWaitSleep)
 				continue
 			}
 
 			if time.Now().Sub(before) > sc.maxInfoWait {
 				sc.close(cm)
+				sc.metrics.Emit(
+					metrics.Error(mnet.ErrFailedToCompleteHandshake),
+					metrics.WithID(sc.id),
+					metrics.With("client", sc.id),
+					metrics.With("network", sc.nid),
+					metrics.Message("Failed to receive handshake completion before max wait"),
+				)
 				return mnet.ErrFailedToCompleteHandshake
 			}
 
 			if !bytes.Equal(msg, handshakeCompletedBytes) {
+				sc.metrics.Emit(
+					metrics.Error(mnet.ErrFailedToCompleteHandshake),
+					metrics.WithID(sc.id),
+					metrics.With("client", sc.id),
+					metrics.With("network", sc.nid),
+					metrics.With("data", string(msg)),
+					metrics.Message("Invalid handshake completion data"),
+				)
 				return mnet.ErrFailedToCompleteHandshake
 			}
 

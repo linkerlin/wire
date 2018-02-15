@@ -150,6 +150,13 @@ func (nc *tcpServerClient) read(cm mnet.Client) ([]byte, error) {
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := nc.handleCINFO(cm); err != nil {
+			nc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.Message("handleCINFO failed"),
+			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -157,6 +164,13 @@ func (nc *tcpServerClient) read(cm mnet.Client) ([]byte, error) {
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
 		if err := nc.handleCLStatusReceive(cm, indata); err != nil {
+			nc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.Message("handleCLStatusRecieve failed"),
+			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -285,16 +299,39 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 		if time.Now().Sub(before) > nc.maxInfoWait {
 			nc.closeConn(cm)
+			nc.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.Message("Timeout: awaiting mnet.RCINFo data"),
+			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		// First message should be a mnet.RCINFO response.
 		if !bytes.HasPrefix(msg, rinfoBytes) {
 			nc.closeConn(cm)
+			nc.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.With("data", string(msg)),
+				metrics.Message("Invalid mnet.RCINFO prefix"),
+			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		if err := nc.handleRINFO(msg); err != nil {
+			nc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.With("data", string(msg)),
+				metrics.Message("Invalid mnet.RCINFO data"),
+			)
 			return err
 		}
 
@@ -323,10 +360,25 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 			if time.Now().Sub(before) > nc.maxInfoWait {
 				nc.closeConn(cm)
+				nc.metrics.Emit(
+					metrics.Error(mnet.ErrFailedToCompleteHandshake),
+					metrics.WithID(nc.id),
+					metrics.With("client", nc.id),
+					metrics.With("network", nc.nid),
+					metrics.Message("Failed to receive handshake completion before max wait"),
+				)
 				return mnet.ErrFailedToCompleteHandshake
 			}
 
 			if !bytes.Equal(msg, handshakeCompletedBytes) {
+				nc.metrics.Emit(
+					metrics.Error(mnet.ErrFailedToCompleteHandshake),
+					metrics.WithID(nc.id),
+					metrics.With("client", nc.id),
+					metrics.With("network", nc.nid),
+					metrics.With("data", string(msg)),
+					metrics.Message("Invalid handshake completion data"),
+				)
 				return mnet.ErrFailedToCompleteHandshake
 			}
 
@@ -405,43 +457,26 @@ func (nc *tcpServerClient) closeConnection(cm mnet.Client) error {
 
 	atomic.StoreInt64(&nc.closed, 1)
 
-	var closeErr error
-	nc.do.Do(func() {
+	nc.flush(cm)
 
-		var lastSOS []byte
-		nc.sos.Do(func(bu *bytes.Buffer) {
-			defer bu.Reset()
-			lastSOS = bu.Bytes()
-		})
+	nc.mu.Lock()
+	if nc.conn == nil {
+		return mnet.ErrAlreadyClosed
+	}
+	err := nc.conn.Close()
+	nc.mu.Unlock()
 
-		nc.bu.Lock()
-		defer nc.bu.Unlock()
-
-		nc.conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
-		nc.buffWriter.Flush()
-		nc.conn.SetWriteDeadline(time.Time{})
-
-		if len(lastSOS) != 0 {
-			nc.conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
-			nc.buffWriter.Write(lastSOS)
-			nc.buffWriter.Flush()
-			nc.conn.SetWriteDeadline(time.Time{})
-		}
-
-		closeErr = nc.conn.Close()
-	})
+	nc.worker.Wait()
 
 	nc.mu.Lock()
 	nc.conn = nil
 	nc.mu.Unlock()
 
-	nc.worker.Wait()
-
 	nc.bu.Lock()
 	nc.buffWriter = nil
 	nc.bu.Unlock()
 
-	return closeErr
+	return err
 }
 
 func (nc *tcpServerClient) getRemoteAddr(cm mnet.Client) (net.Addr, error) {
@@ -483,6 +518,8 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
+				metrics.With("length", nn),
+				metrics.With("data", string(incoming[:nn])),
 				metrics.Message("Connection failed to read: closing"),
 				metrics.With("network", nc.nid),
 			)
@@ -503,26 +540,33 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 				metrics.WithID(nc.id),
 				metrics.Message("ParseError"),
 				metrics.With("network", nc.nid),
+				metrics.With("message", string(incoming[:nn])),
 			)
 			return
 		}
 
 		// Lets resize buffer within area.
-		if nn == len(incoming) && nn < mnet.MaxBufferSize {
+		//if nn < mnet.MinBufferSize && nn < mnet.MinBufferSize/2 {
+		//	incoming = make([]byte, mnet.MinBufferSize/2, mnet.MinBufferSize)
+		//	continue
+		//}
+
+		if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
 			incoming = make([]byte, mnet.MinBufferSize*2)
+			continue
 		}
 
-		if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
-			incoming = make([]byte, len(incoming)/2)
-		}
-
-		if nn > mnet.MinBufferSize && nn < nc.maxWrite {
+		if nn > mnet.MinBufferSize && nn <= nc.maxWrite/2 {
 			incoming = make([]byte, nc.maxWrite/2)
+			continue
 		}
 
-		if nn > mnet.MinBufferSize && nn >= nc.maxWrite {
+		if nn > mnet.MinBufferSize && nn >= nc.maxWrite/2 {
 			incoming = make([]byte, nc.maxWrite)
+			continue
 		}
+
+		incoming = make([]byte, mnet.MinBufferSize)
 	}
 }
 
@@ -841,7 +885,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 				metrics.WithID(cn.id),
 				metrics.With("network", n.ID),
 				metrics.With("addr", cn.remoteAddr),
-				metrics.Message("Connection closing"),
+				metrics.Message("Connection Handler encountered error"),
 			)
 		}
 

@@ -499,21 +499,27 @@ func (n *UDPNetwork) handleConnections(ctx context.Context, conn *net.UDPConn) {
 			}
 
 			// Lets resize buffer within area.
-			if nn == len(incoming) && nn < mnet.MaxBufferSize {
+			//if nn < mnet.MinBufferSize {
+			//	incoming = make([]byte, mnet.MinBufferSize/2)
+			//	continue
+			//}
+
+			if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
 				incoming = make([]byte, mnet.MinBufferSize*2)
+				continue
 			}
 
-			if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
-				incoming = make([]byte, len(incoming)/2)
-			}
-
-			if nn > mnet.MinBufferSize && nn < n.MaxWriterSize {
+			if nn > mnet.MinBufferSize && nn <= n.MaxWriterSize/2 {
 				incoming = make([]byte, n.MaxWriterSize/2)
+				continue
 			}
 
-			if nn > mnet.MinBufferSize && nn >= n.MaxWriterSize {
+			if nn > mnet.MinBufferSize && nn >= n.MaxWriterSize/2 {
 				incoming = make([]byte, n.MaxWriterSize)
+				continue
 			}
+
+			incoming = make([]byte, mnet.MinBufferSize)
 		}
 	}
 }
