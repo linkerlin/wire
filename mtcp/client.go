@@ -143,7 +143,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	network.id = c.ID
 	network.addr = addr
 	network.parser = new(internal.TaggedMessages)
-	network.buffWriter = bufio.NewWriterSize(network.scratch, network.clientMaxWriteSize)
 
 	c.Metrics = network.metrics
 	c.LiveFunc = network.isLive
@@ -325,6 +324,10 @@ func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, erro
 		cn.bu.Lock()
 		defer cn.bu.Unlock()
 
+		if cn.buffWriter == nil {
+			return mnet.ErrAlreadyClosed
+		}
+
 		//available := cn.buffWriter.Available()
 		buffered := cn.buffWriter.Buffered()
 		atomic.AddInt64(&cn.totalFlushed, int64(buffered))
@@ -431,21 +434,14 @@ func (cn *clientNetwork) close(cm mnet.Client) error {
 		metrics.Message("clientNetwork.close"),
 	)
 
+	cn.flush(cm)
+
 	cn.cu.Lock()
-	conn := cn.conn
+	if cn.conn == nil {
+		return mnet.ErrAlreadyClosed
+	}
+	cn.conn.Close()
 	cn.cu.Unlock()
-
-	cn.do.Do(func() {
-		conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
-
-		cn.bu.Lock()
-		cn.buffWriter.Flush()
-		conn.SetWriteDeadline(time.Time{})
-		cn.buffWriter.Reset(cn.scratch)
-		cn.bu.Unlock()
-
-		conn.Close()
-	})
 
 	atomic.StoreInt64(&cn.closed, 1)
 
@@ -454,6 +450,10 @@ func (cn *clientNetwork) close(cm mnet.Client) error {
 	cn.cu.Lock()
 	cn.conn = nil
 	cn.cu.Unlock()
+
+	cn.bu.Lock()
+	cn.buffWriter = nil
+	cn.bu.Unlock()
 
 	return nil
 }
@@ -490,7 +490,7 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	atomic.StoreInt64(&cn.closed, 0)
 
 	cn.bu.Lock()
-	cn.buffWriter.Reset(nil)
+	cn.buffWriter = bufio.NewWriterSize(conn, cn.clientMaxWriteSize)
 	cn.bu.Unlock()
 
 	// if offline buffer has data written in, before new connection was started,
