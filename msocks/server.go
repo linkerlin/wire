@@ -356,12 +356,12 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			incoming = make([]byte, len(incoming)/2)
 		}
 
-		if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
-			incoming = make([]byte, mnet.MaxBufferSize/2)
+		if nn > mnet.MinBufferSize && nn < sc.maxWrite {
+			incoming = make([]byte, sc.maxWrite/2)
 		}
 
-		if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
-			incoming = make([]byte, mnet.MaxBufferSize)
+		if nn > mnet.MinBufferSize && nn >= sc.maxWrite {
+			incoming = make([]byte, sc.maxWrite)
 		}
 	}
 }

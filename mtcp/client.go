@@ -413,12 +413,12 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 			incoming = make([]byte, len(incoming)/2)
 		}
 
-		if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
-			incoming = make([]byte, mnet.MaxBufferSize/2)
+		if nn > mnet.MinBufferSize && nn < cn.clientMaxWriteSize {
+			incoming = make([]byte, cn.clientMaxWriteSize/2)
 		}
 
-		if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
-			incoming = make([]byte, mnet.MaxBufferSize)
+		if nn > mnet.MinBufferSize && nn >= cn.clientMaxWriteSize {
+			incoming = make([]byte, cn.clientMaxWriteSize)
 		}
 	}
 }

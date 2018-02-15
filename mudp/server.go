@@ -507,12 +507,12 @@ func (n *UDPNetwork) handleConnections(ctx context.Context, conn *net.UDPConn) {
 				incoming = make([]byte, len(incoming)/2)
 			}
 
-			if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
-				incoming = make([]byte, mnet.MaxBufferSize/2)
+			if nn > mnet.MinBufferSize && nn < n.MaxWriterSize {
+				incoming = make([]byte, n.MaxWriterSize/2)
 			}
 
-			if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
-				incoming = make([]byte, mnet.MaxBufferSize)
+			if nn > mnet.MinBufferSize && nn >= n.MaxWriterSize {
+				incoming = make([]byte, n.MaxWriterSize)
 			}
 		}
 	}

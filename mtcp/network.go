@@ -512,12 +512,12 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 			incoming = make([]byte, len(incoming)/2)
 		}
 
-		if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
-			incoming = make([]byte, mnet.MaxBufferSize/2)
+		if nn > mnet.MinBufferSize && nn < nc.maxWrite {
+			incoming = make([]byte, nc.maxWrite/2)
 		}
 
-		if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
-			incoming = make([]byte, mnet.MaxBufferSize)
+		if nn > mnet.MinBufferSize && nn >= nc.maxWrite {
+			incoming = make([]byte, nc.maxWrite)
 		}
 	}
 }

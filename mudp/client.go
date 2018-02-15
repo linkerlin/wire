@@ -303,12 +303,12 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 				incoming = make([]byte, len(incoming)/2)
 			}
 
-			if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
-				incoming = make([]byte, mnet.MaxBufferSize/2)
+			if nn > mnet.MinBufferSize && nn < cn.maxWrite {
+				incoming = make([]byte, cn.maxWrite/2)
 			}
 
-			if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
-				incoming = make([]byte, mnet.MaxBufferSize)
+			if nn > mnet.MinBufferSize && nn >= cn.maxWrite {
+				incoming = make([]byte, cn.maxWrite)
 			}
 		}
 	}
