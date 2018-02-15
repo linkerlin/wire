@@ -10,6 +10,8 @@ import (
 
 	"sync"
 
+	"context"
+
 	"github.com/influx6/faux/metrics"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/mnet"
@@ -79,6 +81,15 @@ func DialTimeout(dur time.Duration) ConnectOptions {
 func NetworkID(id string) ConnectOptions {
 	return func(cm *clientConn) {
 		cm.nid = id
+	}
+}
+
+// ReadBuffer sets the read buffer to be used by the udp listener
+// ensure this is set according to what is set on os else the
+// udp listener will error out.
+func ReadBuffer(b int) ConnectOptions {
+	return func(cm *clientConn) {
+		cm.readBuffer = b
 	}
 }
 
@@ -157,6 +168,9 @@ type clientConn struct {
 	keepTimeout time.Duration
 	dialTimeout time.Duration
 	started     int64
+	readBuffer  int
+	ctx         context.Context
+	cancel      func()
 }
 
 func (cn *clientConn) isStarted() bool {
@@ -168,8 +182,31 @@ func (cn *clientConn) close(jn mnet.Client) error {
 		return mnet.ErrAlreadyClosed
 	}
 
-	err := cn.udpServerClient.close(jn)
+	cn.flush(jn)
+
+	cn.cu.Lock()
+	if cn.conn == nil {
+		cn.cu.Unlock()
+		return mnet.ErrAlreadyClosed
+	}
+
+	err := cn.conn.Close()
+	cn.cu.Unlock()
+
+	if cn.cancel != nil {
+		cn.cancel()
+	}
+
 	cn.waiter.Wait()
+
+	cn.cu.Lock()
+	cn.conn = nil
+	cn.cu.Unlock()
+
+	cn.bu.Lock()
+	cn.buffer = nil
+	cn.bu.Unlock()
+
 	return err
 }
 
@@ -181,6 +218,8 @@ func (cn *clientConn) reconnect(jn mnet.Client, addr string) error {
 	defer atomic.StoreInt64(&cn.started, 1)
 
 	cn.waiter.Wait()
+
+	cn.ctx, cn.cancel = context.WithCancel(context.Background())
 
 	if cn.remoteAddr == nil || (cn.remoteAddr != nil && addr != "") {
 		raddr, err := net.ResolveUDPAddr(cn.network, addr)
@@ -223,50 +262,52 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 
 	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
 	for {
-		n, _, err := conn.ReadFrom(incoming)
-		if err != nil {
-			cn.metrics.Send(metrics.Entry{
-				ID:      cn.id,
-				Message: "Connection failed to read: closing",
-				Level:   metrics.ErrorLvl,
-				Field: metrics.Field{
-					"err": err,
-				},
-			})
+		select {
+		case <-cn.ctx.Done():
 			return
-		}
+		default:
+			n, _, err := conn.ReadFrom(incoming)
+			if err != nil {
+				cn.metrics.Send(metrics.Entry{
+					ID:      cn.id,
+					Message: "Connection failed to read: closing",
+					Level:   metrics.ErrorLvl,
+					Field: metrics.Field{
+						"err": err,
+					},
+				})
 
-		// if nothing was read, skip.
-		if n == 0 && len(incoming) == 0 {
-			continue
-		}
+				continue
+			}
 
-		if err := cn.handleMessage(incoming[:n]); err != nil {
-			cn.metrics.Send(metrics.Entry{
-				ID:      cn.id,
-				Message: "ParseError: failed to parse message",
-				Level:   metrics.ErrorLvl,
-				Field: metrics.Field{
-					"err":  err,
-					"data": string(incoming[:n]),
-				},
-			})
-			return
-		}
+			atomic.AddInt64(&cn.totalRead, int64(n))
+			if err := cn.parser.Parse(incoming[:n]); err != nil {
+				cn.metrics.Send(metrics.Entry{
+					ID:      cn.id,
+					Message: "ParseError: failed to parse message",
+					Level:   metrics.ErrorLvl,
+					Field: metrics.Field{
+						"err":  err,
+						"data": string(incoming[:n]),
+					},
+				})
+				return
+			}
 
-		atomic.AddInt64(&cn.totalRead, int64(n))
+			atomic.AddInt64(&cn.totalRead, int64(n))
 
-		// Lets shrink buffer abit within area.
-		if n == len(incoming) && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MinBufferSize*2]
-		}
+			// Lets shrink buffer abit within area.
+			if n == len(incoming) && n < mnet.MaxBufferSize {
+				incoming = incoming[0 : mnet.MinBufferSize*2]
+			}
 
-		if n < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
-			incoming = incoming[0 : len(incoming)/2]
-		}
+			if n < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
+				incoming = incoming[0 : len(incoming)/2]
+			}
 
-		if n > len(incoming) && len(incoming) > mnet.MinBufferSize && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MaxBufferSize/2]
+			if n > len(incoming) && len(incoming) > mnet.MinBufferSize && n < mnet.MaxBufferSize {
+				incoming = incoming[0 : mnet.MaxBufferSize/2]
+			}
 		}
 	}
 }
@@ -306,6 +347,10 @@ func (cn *clientConn) getConn(_ mnet.Client, addr net.Addr) (*net.UDPConn, error
 	}
 
 	if udpcon, ok := conn.(*net.UDPConn); ok {
+		if cn.readBuffer != 0 {
+			return udpcon, udpcon.SetReadBuffer(cn.readBuffer)
+		}
+
 		return udpcon, nil
 	}
 
