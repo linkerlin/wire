@@ -25,8 +25,8 @@ var (
 	ErrLimitExceeded   = errors.New("writer space exceeded")
 	ErrNotStream       = errors.New("data is not a stream transmission")
 	ErrStreamDataParts = errors.New("invalid stream data, expected 2 part pieces")
-	ErrInvalidHeader   = errors.New("invalid header data: max data size 4294967295")
-	ErrHeaderLength    = errors.New("invalid data, expected length of 4 for header size")
+	ErrHeaderLength    = errors.New("invalid header, header length not matching expected")
+	ErrInvalidHeader   = errors.New("invalid header data max size: must be either int16, int32, int64 range")
 )
 
 var (
