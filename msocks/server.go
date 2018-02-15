@@ -297,7 +297,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	defer sc.close(mnet.Client{})
 	defer sc.waiter.Done()
 
-	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
+	incoming := make([]byte, mnet.MinBufferSize)
 
 	for {
 		frame, err := reader.NextFrame()
@@ -312,11 +312,11 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			return
 		}
 
-		if int(frame.Length) > len(incoming) && int(frame.Length) < mnet.MaxBufferSize {
-			incoming = incoming[:int(frame.Length)]
+		if int(frame.Length) > len(incoming) && int(frame.Length) > mnet.MinBufferSize {
+			incoming = make([]byte, frame.Length)
 		}
 
-		n, err := reader.Read(incoming)
+		nn, err := reader.Read(incoming)
 		if err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
@@ -327,20 +327,17 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			return
 		}
 
-		// if nothing was read, skip.
-		if n == 0 && len(incoming) == 0 {
-			continue
-		}
-
 		sc.metrics.Send(metrics.Entry{
 			Message: "Received websocket message",
 			Field: metrics.Field{
-				"data": string(incoming[:n]),
+				"data": string(incoming[:nn]),
 			},
 		})
 
+		atomic.AddInt64(&sc.totalRead, int64(nn))
+
 		// Send into go-routine (critical path)?
-		if err := sc.parser.Parse(incoming[:n]); err != nil {
+		if err := sc.parser.Parse(incoming[:nn]); err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
@@ -350,19 +347,21 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			return
 		}
 
-		atomic.AddInt64(&sc.totalRead, int64(n))
-
 		// Lets resize buffer within area.
-		if n == len(incoming) && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MinBufferSize*2]
+		if nn == len(incoming) && nn < mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MinBufferSize*2)
 		}
 
-		if n < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
-			incoming = incoming[0 : len(incoming)/2]
+		if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
+			incoming = make([]byte, len(incoming)/2)
 		}
 
-		if n > len(incoming) && len(incoming) > mnet.MinBufferSize && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MaxBufferSize/2]
+		if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MaxBufferSize/2)
+		}
+
+		if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MaxBufferSize)
 		}
 	}
 }

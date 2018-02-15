@@ -381,9 +381,9 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 	defer cn.close(cm)
 	defer cn.worker.Done()
 
-	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
+	incoming := make([]byte, mnet.MinBufferSize)
 	for {
-		n, err := conn.Read(incoming)
+		nn, err := conn.Read(incoming)
 		if err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
@@ -394,29 +394,28 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 			return
 		}
 
-		// if nothing was read, skip.
-		if n == 0 && len(incoming) == 0 {
-			continue
-		}
+		atomic.AddInt64(&cn.totalRead, int64(nn))
 
 		// if we fail to parse the data then we error out.
-		if err := cn.parser.Parse(incoming[:n]); err != nil {
+		if err := cn.parser.Parse(incoming[:nn]); err != nil {
 			return
 		}
 
-		atomic.AddInt64(&cn.totalRead, int64(n))
-
-		// Lets shrink buffer abit within area.
-		if n == len(incoming) && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MinBufferSize*2]
+		// Lets resize buffer within area.
+		if nn == len(incoming) && nn < mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MinBufferSize*2)
 		}
 
-		if n < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
-			incoming = incoming[0 : len(incoming)/2]
+		if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
+			incoming = make([]byte, len(incoming)/2)
 		}
 
-		if n > len(incoming) && len(incoming) > mnet.MinBufferSize && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MaxBufferSize/2]
+		if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MaxBufferSize/2)
+		}
+
+		if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MaxBufferSize)
 		}
 	}
 }

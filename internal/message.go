@@ -287,12 +287,8 @@ func (smp *TaggedMessages) Parse(d []byte) error {
 
 		next := smp.scratch.Next(nextSize)
 
-		// copy data to avoid corruption bug.
-		nextCopy := make([]byte, len(next))
-		n := copy(nextCopy, next)
-
 		msg := messagePool.New().(*messageTomb)
-		msg.Data = nextCopy[:n]
+		msg.Data = next
 		smp.addMessage(msg)
 	}
 

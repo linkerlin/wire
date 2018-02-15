@@ -460,7 +460,7 @@ func (n *UDPNetwork) handleConnections(ctx context.Context, conn *net.UDPConn) {
 	defer n.rung.Done()
 	defer n.handleCloseConnections(ctx)
 
-	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
+	incoming := make([]byte, mnet.MinBufferSize)
 
 	for {
 		select {
@@ -500,15 +500,19 @@ func (n *UDPNetwork) handleConnections(ctx context.Context, conn *net.UDPConn) {
 
 			// Lets resize buffer within area.
 			if nn == len(incoming) && nn < mnet.MaxBufferSize {
-				incoming = incoming[0 : mnet.MinBufferSize*2]
+				incoming = make([]byte, mnet.MinBufferSize*2)
 			}
 
-			if nn < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
-				incoming = incoming[0 : len(incoming)/2]
+			if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
+				incoming = make([]byte, len(incoming)/2)
 			}
 
-			if nn > len(incoming) && len(incoming) > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
-				incoming = incoming[0 : mnet.MaxBufferSize/2]
+			if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
+				incoming = make([]byte, mnet.MaxBufferSize/2)
+			}
+
+			if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
+				incoming = make([]byte, mnet.MaxBufferSize)
 			}
 		}
 	}

@@ -460,17 +460,17 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 
 	var cn net.Conn
 	nc.mu.RLock()
+	if nc.conn == nil {
+		nc.mu.RUnlock()
+		return
+	}
 	cn = nc.conn
 	nc.mu.RUnlock()
 
-	if cn == nil {
-		return
-	}
-
-	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
+	incoming := make([]byte, mnet.MinBufferSize)
 
 	for {
-		n, err := cn.Read(incoming)
+		nn, err := cn.Read(incoming)
 		if err != nil {
 			nc.sos.Do(func(bu *bytes.Buffer) {
 				bu.WriteString("-ERR ")
@@ -485,13 +485,10 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 			return
 		}
 
-		// if nothing was read, skip.
-		if n == 0 && len(incoming) == 0 {
-			continue
-		}
+		atomic.AddInt64(&nc.totalRead, int64(nn))
 
 		// Send into go-routine (critical path)?
-		if err := nc.parser.Parse(incoming[:n]); err != nil {
+		if err := nc.parser.Parse(incoming[:nn]); err != nil {
 			nc.sos.Do(func(bu *bytes.Buffer) {
 				bu.WriteString("-ERR ")
 				bu.WriteString(err.Error())
@@ -506,19 +503,21 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 			return
 		}
 
-		atomic.AddInt64(&nc.totalRead, int64(n))
-
 		// Lets resize buffer within area.
-		if n == len(incoming) && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MinBufferSize*2]
+		if nn == len(incoming) && nn < mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MinBufferSize*2)
 		}
 
-		if n < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
-			incoming = incoming[0 : len(incoming)/2]
+		if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
+			incoming = make([]byte, len(incoming)/2)
 		}
 
-		if n > len(incoming) && len(incoming) > mnet.MinBufferSize && n < mnet.MaxBufferSize {
-			incoming = incoming[0 : mnet.MaxBufferSize/2]
+		if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MaxBufferSize/2)
+		}
+
+		if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
+			incoming = make([]byte, mnet.MaxBufferSize)
 		}
 	}
 }

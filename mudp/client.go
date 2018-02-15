@@ -260,13 +260,13 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 	defer cn.close(jn)
 	defer cn.waiter.Done()
 
-	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
+	incoming := make([]byte, mnet.MinBufferSize)
 	for {
 		select {
 		case <-cn.ctx.Done():
 			return
 		default:
-			n, _, err := conn.ReadFrom(incoming)
+			nn, _, err := conn.ReadFrom(incoming)
 			if err != nil {
 				cn.metrics.Send(metrics.Entry{
 					ID:      cn.id,
@@ -280,33 +280,35 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 				continue
 			}
 
-			atomic.AddInt64(&cn.totalRead, int64(n))
-			if err := cn.parser.Parse(incoming[:n]); err != nil {
+			atomic.AddInt64(&cn.totalRead, int64(nn))
+			if err := cn.parser.Parse(incoming[:nn]); err != nil {
 				cn.metrics.Send(metrics.Entry{
 					ID:      cn.id,
 					Message: "ParseError: failed to parse message",
 					Level:   metrics.ErrorLvl,
 					Field: metrics.Field{
 						"err":  err,
-						"data": string(incoming[:n]),
+						"data": string(incoming[:nn]),
 					},
 				})
 				return
 			}
 
-			atomic.AddInt64(&cn.totalRead, int64(n))
-
-			// Lets shrink buffer abit within area.
-			if n == len(incoming) && n < mnet.MaxBufferSize {
-				incoming = incoming[0 : mnet.MinBufferSize*2]
+			// Lets resize buffer within area.
+			if nn == len(incoming) && nn < mnet.MaxBufferSize {
+				incoming = make([]byte, mnet.MinBufferSize*2)
 			}
 
-			if n < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
-				incoming = incoming[0 : len(incoming)/2]
+			if nn < len(incoming)/2 && nn > mnet.MinBufferSize {
+				incoming = make([]byte, len(incoming)/2)
 			}
 
-			if n > len(incoming) && len(incoming) > mnet.MinBufferSize && n < mnet.MaxBufferSize {
-				incoming = incoming[0 : mnet.MaxBufferSize/2]
+			if nn > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
+				incoming = make([]byte, mnet.MaxBufferSize/2)
+			}
+
+			if nn > mnet.MinBufferSize && nn >= mnet.MaxBufferSize {
+				incoming = make([]byte, mnet.MaxBufferSize)
 			}
 		}
 	}
