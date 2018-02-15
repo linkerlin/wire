@@ -376,6 +376,8 @@ func (sc *websocketServerClient) getInfo(cm mnet.Client) mnet.Info {
 		ServerNode: true,
 		Cluster:    sc.isACluster,
 		ServerAddr: sc.serverAddr.String(),
+		MaxBuffer:  int64(sc.maxWrite),
+		MinBuffer:  mnet.MinBufferSize,
 	}
 
 }
@@ -405,6 +407,8 @@ func (sc *websocketServerClient) handleCLStatusSend(cm mnet.Client) error {
 	info.ID = sc.nid
 	info.Cluster = true
 	info.ServerNode = true
+	info.MinBuffer = mnet.MinBufferSize
+	info.MaxBuffer = int64(sc.maxWrite)
 	info.ServerAddr = sc.serverAddr.String()
 
 	jsn, err := json.Marshal(info)

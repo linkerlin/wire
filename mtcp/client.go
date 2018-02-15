@@ -226,6 +226,8 @@ func (cn *clientNetwork) getInfo(cm mnet.Client) mnet.Info {
 	return mnet.Info{
 		ID:         cn.id,
 		ServerAddr: addr,
+		MinBuffer:  mnet.MinBufferSize,
+		MaxBuffer:  int64(cn.clientMaxWriteSize),
 	}
 }
 

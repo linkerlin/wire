@@ -192,6 +192,8 @@ type Info struct {
 	ServerNode bool
 	ID         string
 	ServerAddr string
+	MaxBuffer  int64
+	MinBuffer  int64
 }
 
 //*************************************************************************
@@ -466,13 +468,4 @@ type Meta struct {
 	Total int64
 	Id    string
 	Parts []Part
-}
-
-// StreamReader defines an interface type which exposes a read method
-// that returns a data with associated meta information if it was
-// streamed as collective chunks over the wire, else returning
-// an error if any occured or ErrNoDataYet, if no data is
-// currently available.
-type StreamReader interface {
-	Read() ([]byte, *Meta, error)
 }

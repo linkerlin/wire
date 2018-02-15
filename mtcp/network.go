@@ -174,6 +174,8 @@ func (nc *tcpServerClient) getInfo(cm mnet.Client) mnet.Info {
 			ID:         nc.id,
 			ServerNode: true,
 			Cluster:    nc.isACluster,
+			MaxBuffer:  int64(nc.maxWrite),
+			MinBuffer:  mnet.MinBufferSize,
 			ServerAddr: nc.serverAddr.String(),
 		}
 	}
@@ -206,6 +208,8 @@ func (nc *tcpServerClient) handleCLStatusSend(cm mnet.Client) error {
 	info.Cluster = true
 	info.ServerNode = true
 	info.ID = nc.network.ID
+	info.MaxBuffer = int64(nc.maxWrite)
+	info.MinBuffer = mnet.MinBufferSize
 	info.ServerAddr = nc.network.raddr.String()
 
 	jsn, err := json.Marshal(info)
