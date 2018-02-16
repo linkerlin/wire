@@ -16,6 +16,12 @@ const (
 	pending
 )
 
+const (
+	max2 uint16 = 65535
+	max4 uint32 = 4294967295
+	max8 uint64 = 18446744073709551615
+)
+
 // errors ...
 var (
 	ErrInvalidReadState    = errors.New("invalid read state encountered")
@@ -32,7 +38,6 @@ var (
 // all expected data as specified by header received.
 type LengthReader struct {
 	header int
-	max    int
 	target int
 	rem    int
 	last   int
@@ -43,15 +48,13 @@ type LengthReader struct {
 }
 
 // NewLengthReader returns a new instance of a LengthReader.
-func NewLengthReader(r io.Reader, headerLen int, maxDataSize int) *LengthReader {
+func NewLengthReader(r io.Reader, headerLen int) *LengthReader {
 	return &LengthReader{
 		r:      r,
 		header: headerLen,
 		state:  nostate,
-		max:    maxDataSize,
 		last:   mnet.MinBufferSize,
 		area:   make([]byte, headerLen),
-		buff:   make([]byte, 0, maxDataSize),
 	}
 }
 
@@ -93,32 +96,36 @@ func (lr *LengthReader) readHeader() error {
 	switch lr.header {
 	case 2:
 		lr.target = int(binary.BigEndian.Uint16(lr.area))
+		if uint16(lr.target) > max2 {
+			return ErrInvalidHeader
+		}
 	case 4:
 		lr.target = int(binary.BigEndian.Uint32(lr.area))
+		if uint32(lr.target) > max4 {
+			return ErrInvalidHeader
+		}
 	case 8:
 		lr.target = int(binary.BigEndian.Uint64(lr.area))
-	}
-
-	if lr.target > lr.max {
-		return ErrInvalidHeader
+		if uint64(lr.target) > max8 {
+			return ErrInvalidHeader
+		}
 	}
 
 	lr.last = 0
 	lr.rem = lr.target
+	lr.buff = make([]byte, lr.target)
 	atomic.StoreInt64(&lr.state, pending)
 	return nil
 }
 
 func (lr *LengthReader) readBody() ([]byte, error) {
 	if lr.last == lr.target && lr.rem == 0 {
-		cloned := make([]byte, lr.target)
-		copy(cloned[0:lr.target], lr.buff[0:lr.target])
-
+		data := lr.buff[0:lr.target]
 		lr.reset()
-		return cloned, nil
+		return data, nil
 	}
 
-	sector := lr.buff[lr.last:lr.rem]
+	sector := lr.buff[lr.last : lr.last+lr.rem]
 	n, err := lr.r.Read(sector)
 	if err != nil && err != io.EOF {
 		lr.reset()
@@ -145,6 +152,6 @@ func (lr *LengthReader) reset() {
 	lr.target = 0
 	lr.last = 0
 	lr.rem = 0
-	lr.buff = lr.buff[:0]
+	lr.buff = nil
 	atomic.StoreInt64(&lr.state, nostate)
 }

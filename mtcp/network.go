@@ -3,7 +3,6 @@ package mtcp
 import (
 	"bufio"
 	"crypto/tls"
-	"encoding/binary"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -403,9 +402,49 @@ func (nc *tcpServerClient) write(cm mnet.Client, inSize int) (io.WriteCloser, er
 		return nil, mnet.ErrAlreadyClosed
 	}
 
-	return bufferPool.Get(inSize, func(incoming int, w io.WriterTo) error {
-		atomic.AddInt64(&nc.totalWriteMsgs, 1)
-		atomic.AddInt64(&nc.totalWritten, int64(incoming))
+	//return bufferPool.Get(inSize, func(incoming int, w io.WriterTo) error {
+	//	atomic.AddInt64(&nc.totalWriteMsgs, 1)
+	//	atomic.AddInt64(&nc.totalWritten, int64(incoming))
+	//
+	//	nc.bu.Lock()
+	//	defer nc.bu.Unlock()
+	//
+	//	if nc.buffWriter == nil {
+	//		return mnet.ErrAlreadyClosed
+	//	}
+	//
+	//	//available := nc.buffWriter.Available()
+	//	buffered := nc.buffWriter.Buffered()
+	//	atomic.AddInt64(&nc.totalFlushOut, int64(buffered))
+	//
+	//	// size of next write.
+	//	toWrite := buffered + incoming
+	//
+	//	// add size header
+	//	toWrite += mnet.HeaderLength
+	//
+	//	if toWrite >= nc.maxWrite {
+	//		conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
+	//		if err := nc.buffWriter.Flush(); err != nil {
+	//			conn.SetWriteDeadline(time.Time{})
+	//			return err
+	//		}
+	//		conn.SetWriteDeadline(time.Time{})
+	//	}
+	//
+	//	// write length header first.
+	//	header := make([]byte, mnet.HeaderLength)
+	//	binary.BigEndian.PutUint32(header, uint32(incoming))
+	//	nc.buffWriter.Write(header)
+	//
+	//	// then flush data alongside header.
+	//	_, err := w.WriteTo(nc.buffWriter)
+	//	return err
+	//}), nil
+
+	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
+		atomic.AddInt64(&nc.totalWritten, 1)
+		atomic.AddInt64(&nc.totalWritten, int64(len(data)))
 
 		nc.bu.Lock()
 		defer nc.bu.Unlock()
@@ -419,7 +458,7 @@ func (nc *tcpServerClient) write(cm mnet.Client, inSize int) (io.WriteCloser, er
 		atomic.AddInt64(&nc.totalFlushOut, int64(buffered))
 
 		// size of next write.
-		toWrite := buffered + incoming
+		toWrite := buffered + len(data)
 
 		// add size header
 		toWrite += mnet.HeaderLength
@@ -433,15 +472,16 @@ func (nc *tcpServerClient) write(cm mnet.Client, inSize int) (io.WriteCloser, er
 			conn.SetWriteDeadline(time.Time{})
 		}
 
-		// write length header first.
-		header := make([]byte, mnet.HeaderLength)
-		binary.BigEndian.PutUint32(header, uint32(incoming))
-		nc.buffWriter.Write(header)
+		if _, err := nc.buffWriter.Write(size); err != nil {
+			return err
+		}
 
-		// then flush data alongside header.
-		_, err := w.WriteTo(nc.buffWriter)
-		return err
-	}), nil
+		if _, err := nc.buffWriter.Write(data); err != nil {
+			return err
+		}
+
+		return nil
+	}, mnet.HeaderLength, inSize), nil
 }
 
 func (nc *tcpServerClient) closeConnection(cm mnet.Client) error {
@@ -506,67 +546,37 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 	cn = nc.conn
 	nc.mu.RUnlock()
 
-	incoming := make([]byte, mnet.MinBufferSize)
+	connReader := bufio.NewReaderSize(cn, nc.maxWrite)
+	lreader := internal.NewLengthReader(connReader, mnet.HeaderLength)
 
 	for {
-		nn, err := cn.Read(incoming)
+		incoming, err := lreader.Read()
 		if err != nil {
-			nc.sos.Do(func(bu *bytes.Buffer) {
-				bu.WriteString("-ERR ")
-				bu.WriteString(err.Error())
-			})
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
-				metrics.With("length", nn),
-				metrics.With("data", string(incoming[:nn])),
+				metrics.With("length", len(incoming)),
+				metrics.With("data", string(incoming)),
 				metrics.Message("Connection failed to read: closing"),
 				metrics.With("network", nc.nid),
 			)
 			return
 		}
 
-		atomic.AddInt64(&nc.totalRead, int64(nn))
+		atomic.AddInt64(&nc.totalRead, int64(len(incoming)))
 
 		// Send into go-routine (critical path)?
-		if err := nc.parser.Parse(incoming[:nn]); err != nil {
-			nc.sos.Do(func(bu *bytes.Buffer) {
-				bu.WriteString("-ERR ")
-				bu.WriteString(err.Error())
-			})
-
+		if err := nc.parser.Parse(incoming); err != nil {
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
 				metrics.Message("ParseError"),
 				metrics.With("network", nc.nid),
-				metrics.With("message", string(incoming[:nn])),
+				metrics.With("length", len(incoming)),
+				metrics.With("data", string(incoming)),
 			)
 			return
 		}
-
-		// Lets resize buffer within area.
-		//if nn < mnet.MinBufferSize && nn < mnet.MinBufferSize/2 {
-		//	incoming = make([]byte, mnet.MinBufferSize/2, mnet.MinBufferSize)
-		//	continue
-		//}
-
-		if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
-			incoming = make([]byte, mnet.MinBufferSize*2)
-			continue
-		}
-
-		if nn > mnet.MinBufferSize && nn <= nc.maxWrite/2 {
-			incoming = make([]byte, nc.maxWrite/2)
-			continue
-		}
-
-		if nn > mnet.MinBufferSize && nn >= nc.maxWrite/2 {
-			incoming = make([]byte, nc.maxWrite)
-			continue
-		}
-
-		incoming = make([]byte, mnet.MinBufferSize)
 	}
 }
 
@@ -836,44 +846,44 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 		metrics.With("remote_addr", conn.RemoteAddr()),
 	)
 
-	cn := new(tcpServerClient)
-	cn.id = id
-	cn.nid = n.ID
-	cn.conn = conn
-	cn.network = n
-	cn.metrics = n.Metrics
-	cn.serverAddr = n.raddr
-	cn.isACluster = isCluster
-	cn.maxInfoWait = n.MaxInfoWait
-	cn.localAddr = conn.LocalAddr()
-	cn.remoteAddr = conn.RemoteAddr()
-	cn.maxWrite = n.MaxWriteSize
-	cn.sos = newGuardedBuffer(512)
-	cn.maxDeadline = n.MaxWriteDeadline
-	cn.parser = new(internal.TaggedMessages)
-	cn.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
+	nc := new(tcpServerClient)
+	nc.id = id
+	nc.nid = n.ID
+	nc.conn = conn
+	nc.network = n
+	nc.metrics = n.Metrics
+	nc.serverAddr = n.raddr
+	nc.isACluster = isCluster
+	nc.maxInfoWait = n.MaxInfoWait
+	nc.localAddr = conn.LocalAddr()
+	nc.remoteAddr = conn.RemoteAddr()
+	nc.maxWrite = n.MaxWriteSize
+	nc.sos = newGuardedBuffer(512)
+	nc.maxDeadline = n.MaxWriteDeadline
+	nc.parser = new(internal.TaggedMessages)
+	nc.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
 
-	client.LiveFunc = cn.isLive
-	client.InfoFunc = cn.getInfo
-	client.ReaderFunc = cn.read
-	client.WriteFunc = cn.write
-	client.FlushFunc = cn.flush
-	client.CloseFunc = cn.closeConn
-	client.IsClusterFunc = cn.isCluster
-	client.LocalAddrFunc = cn.getLocalAddr
-	client.StatisticFunc = cn.getStatistics
+	client.LiveFunc = nc.isLive
+	client.InfoFunc = nc.getInfo
+	client.ReaderFunc = nc.read
+	client.WriteFunc = nc.write
+	client.FlushFunc = nc.flush
+	client.CloseFunc = nc.closeConn
+	client.IsClusterFunc = nc.isCluster
+	client.LocalAddrFunc = nc.getLocalAddr
+	client.StatisticFunc = nc.getStatistics
 	client.SiblingsFunc = n.getOtherClients
-	client.RemoteAddrFunc = cn.getRemoteAddr
+	client.RemoteAddrFunc = nc.getRemoteAddr
 
-	cn.worker.Add(1)
-	go cn.readLoop(client)
+	nc.worker.Add(1)
+	go nc.readLoop(client)
 
-	if err := cn.handshake(client); err != nil {
+	if err := nc.handshake(client); err != nil {
 		return err
 	}
 
 	n.cu.Lock()
-	n.clients[id] = cn
+	n.clients[id] = nc
 	n.cu.Unlock()
 
 	atomic.AddInt64(&n.totalClients, 1)
@@ -882,9 +892,9 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 			client.Close()
 			n.Metrics.Emit(
 				metrics.Error(err),
-				metrics.WithID(cn.id),
+				metrics.WithID(nc.id),
 				metrics.With("network", n.ID),
-				metrics.With("addr", cn.remoteAddr),
+				metrics.With("addr", nc.remoteAddr),
 				metrics.Message("Connection Handler encountered error"),
 			)
 		}
@@ -898,9 +908,9 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 				if err := policy.Retry(); err != nil {
 					n.Metrics.Emit(
 						metrics.Error(err),
-						metrics.WithID(cn.id),
+						metrics.WithID(nc.id),
 						metrics.With("network", n.ID),
-						metrics.With("addr", cn.remoteAddr),
+						metrics.With("addr", nc.remoteAddr),
 						metrics.Message("RetryPolicy failed"),
 					)
 				}

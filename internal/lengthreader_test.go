@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"io"
@@ -17,17 +18,18 @@ func TestLengthReader_Header2(t *testing.T) {
 	msg2 := buildMessage(20)
 	msg3 := buildMessage(30)
 	reader := bytes.NewBuffer(makeMessages(2, msg1, msg2, msg3))
-	lr := internal.NewLengthReader(reader, 2, 512)
+	lr := internal.NewLengthReader(reader, 2)
 
 	rec1, err := lr.Read()
+	fmt.Printf("Length %d -> %d :: %+q\n", len(rec1), len(msg1), err)
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully read first message")
 	}
 	tests.Passed("Should have successfully read first message")
 
 	if !bytes.Equal(msg1, rec1) {
-		tests.Info("Received: %+q", rec1)
-		tests.Info("Expected: %+q", msg1)
+		tests.Info("Received: %#v", rec1)
+		tests.Info("Expected: %#v", msg1)
 		tests.Failed("Should have successfully matched first message with expected")
 	}
 	tests.Passed("Should have successfully matched first message with expected")
@@ -39,8 +41,8 @@ func TestLengthReader_Header2(t *testing.T) {
 	tests.Passed("Should have successfully read second message")
 
 	if !bytes.Equal(msg2, rec2) {
-		tests.Info("Received: %+q", rec2)
-		tests.Info("Expected: %+q", msg2)
+		tests.Info("Received: %#v", rec2)
+		tests.Info("Expected: %#v", msg2)
 		tests.Failed("Should have successfully matched second message with expected")
 	}
 	tests.Passed("Should have successfully matched second message with expected")
@@ -52,8 +54,8 @@ func TestLengthReader_Header2(t *testing.T) {
 	tests.Passed("Should have successfully read third message")
 
 	if !bytes.Equal(msg3, rec3) {
-		tests.Info("Received: %+q", rec3)
-		tests.Info("Expected: %+q", msg3)
+		tests.Info("Received: %#v", rec3)
+		tests.Info("Expected: %#v", msg3)
 		tests.Failed("Should have successfully matched second message with expected")
 	}
 	tests.Passed("Should have successfully matched second message with expected")
@@ -69,7 +71,7 @@ func TestLengthReader_Header4(t *testing.T) {
 	msg2 := buildMessage(120)
 	msg3 := buildMessage(40)
 	reader := bytes.NewBuffer(makeMessages(4, msg1, msg2, msg3))
-	lr := internal.NewLengthReader(reader, 4, 512)
+	lr := internal.NewLengthReader(reader, 4)
 
 	rec1, err := lr.Read()
 	if err != nil {
@@ -78,8 +80,8 @@ func TestLengthReader_Header4(t *testing.T) {
 	tests.Passed("Should have successfully read first message")
 
 	if !bytes.Equal(msg1, rec1) {
-		tests.Info("Received: %+q", rec1)
-		tests.Info("Expected: %+q", msg1)
+		tests.Info("Received: %#v", rec1)
+		tests.Info("Expected: %#v", msg1)
 		tests.Failed("Should have successfully matched first message with expected")
 	}
 	tests.Passed("Should have successfully matched first message with expected")
@@ -91,8 +93,8 @@ func TestLengthReader_Header4(t *testing.T) {
 	tests.Passed("Should have successfully read second message")
 
 	if !bytes.Equal(msg2, rec2) {
-		tests.Info("Received: %+q", rec2)
-		tests.Info("Expected: %+q", msg2)
+		tests.Info("Received: %#v", rec2)
+		tests.Info("Expected: %#v", msg2)
 		tests.Failed("Should have successfully matched second message with expected")
 	}
 	tests.Passed("Should have successfully matched second message with expected")
@@ -104,8 +106,8 @@ func TestLengthReader_Header4(t *testing.T) {
 	tests.Passed("Should have successfully read third message")
 
 	if !bytes.Equal(msg3, rec3) {
-		tests.Info("Received: %+q", rec3)
-		tests.Info("Expected: %+q", msg3)
+		tests.Info("Received: %#v", rec3)
+		tests.Info("Expected: %#v", msg3)
 		tests.Failed("Should have successfully matched second message with expected")
 	}
 	tests.Passed("Should have successfully matched second message with expected")
@@ -121,7 +123,7 @@ func TestLengthReader_Header8(t *testing.T) {
 	msg2 := buildMessage(120)
 	msg3 := buildMessage(40)
 	reader := bytes.NewBuffer(makeMessages(8, msg1, msg2, msg3))
-	lr := internal.NewLengthReader(reader, 8, 512)
+	lr := internal.NewLengthReader(reader, 8)
 
 	rec1, err := lr.Read()
 	if err != nil {
@@ -130,8 +132,8 @@ func TestLengthReader_Header8(t *testing.T) {
 	tests.Passed("Should have successfully read first message")
 
 	if !bytes.Equal(msg1, rec1) {
-		tests.Info("Received: %+q", rec1)
-		tests.Info("Expected: %+q", msg1)
+		tests.Info("Received: %#v", rec1)
+		tests.Info("Expected: %#v", msg1)
 		tests.Failed("Should have successfully matched first message with expected")
 	}
 	tests.Passed("Should have successfully matched first message with expected")
@@ -143,8 +145,8 @@ func TestLengthReader_Header8(t *testing.T) {
 	tests.Passed("Should have successfully read second message")
 
 	if !bytes.Equal(msg2, rec2) {
-		tests.Info("Received: %+q", rec2)
-		tests.Info("Expected: %+q", msg2)
+		tests.Info("Received: %#v", rec2)
+		tests.Info("Expected: %#v", msg2)
 		tests.Failed("Should have successfully matched second message with expected")
 	}
 	tests.Passed("Should have successfully matched second message with expected")
@@ -156,8 +158,8 @@ func TestLengthReader_Header8(t *testing.T) {
 	tests.Passed("Should have successfully read third message")
 
 	if !bytes.Equal(msg3, rec3) {
-		tests.Info("Received: %+q", rec3)
-		tests.Info("Expected: %+q", msg3)
+		tests.Info("Received: %#v", rec3)
+		tests.Info("Expected: %#v", msg3)
 		tests.Failed("Should have successfully matched second message with expected")
 	}
 	tests.Passed("Should have successfully matched second message with expected")
@@ -168,12 +170,12 @@ func TestLengthReader_Header8(t *testing.T) {
 	tests.Passed("Should have received io.EOF error")
 }
 
-func TestLengthReader_UncompletedData(t *testing.T) {
+func TestLengthReader_HeaderUncompletedData(t *testing.T) {
 	msg1 := buildMessage(256)
 	sizedMsg := makeMessage(string(msg1), 4)
 
 	reader := bytes.NewBuffer(sizedMsg[:80])
-	lr := internal.NewLengthReader(reader, 4, 512)
+	lr := internal.NewLengthReader(reader, 4)
 
 	_, err := lr.Read()
 	if err != internal.ErrUncompletedTransfer {
@@ -187,13 +189,23 @@ func TestLengthReader_InvalidHeader(t *testing.T) {
 	sizedMsg := makeMessage(string(msg1), 2)
 
 	reader := bytes.NewBuffer(sizedMsg[:80])
-	lr := internal.NewLengthReader(reader, 4, 512)
+	lr := internal.NewLengthReader(reader, 4)
 
 	_, err := lr.Read()
-	if err != internal.ErrInvalidHeader {
+	if err != internal.ErrUncompletedTransfer {
 		tests.FailedWithError(err, "Should have received ErrUncompletedTransfer from reader")
 	}
 	tests.PassedWithError(err, "Should have received ErrUncompletedTransfer from reader")
+}
+
+//**********************************************************************************
+// utilities
+//**********************************************************************************
+
+func buildMessage(size int) []byte {
+	data := make([]byte, size)
+	rand.Read(data)
+	return data
 }
 
 func makeMessages(size int, msgs ...[]byte) []byte {
@@ -202,12 +214,6 @@ func makeMessages(size int, msgs ...[]byte) []byte {
 		m = append(m, makeMessage(string(msg), size)...)
 	}
 	return m
-}
-
-func buildMessage(size int) []byte {
-	data := make([]byte, size)
-	rand.Read(data)
-	return data
 }
 
 func makeMessage(msg string, size int) []byte {

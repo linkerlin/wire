@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"encoding/binary"
 	"encoding/json"
 
 	"github.com/influx6/faux/metrics"
@@ -180,7 +179,6 @@ type clientNetwork struct {
 
 	parser     *internal.TaggedMessages
 	streams    *internal.StreamedMessages
-	scratch    *bytes.Buffer
 	bu         sync.Mutex
 	buffWriter *bufio.Writer
 
@@ -319,9 +317,49 @@ func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, erro
 		return nil, mnet.ErrAlreadyClosed
 	}
 
-	return bufferPool.Get(inSize, func(incoming int, w io.WriterTo) error {
+	//return bufferPool.Get(inSize, func(incoming int, w io.WriterTo) error {
+	//	atomic.AddInt64(&cn.MessageWritten, 1)
+	//	atomic.AddInt64(&cn.totalWritten, int64(incoming))
+	//
+	//	cn.bu.Lock()
+	//	defer cn.bu.Unlock()
+	//
+	//	if cn.buffWriter == nil {
+	//		return mnet.ErrAlreadyClosed
+	//	}
+	//
+	//	//available := cn.buffWriter.Available()
+	//	buffered := cn.buffWriter.Buffered()
+	//	atomic.AddInt64(&cn.totalFlushed, int64(buffered))
+	//
+	//	// size of next write.
+	//	toWrite := buffered + incoming
+	//
+	//	// add size header
+	//	toWrite += mnet.HeaderLength
+	//
+	//	if toWrite >= cn.clientMaxWriteSize {
+	//		conn.SetWriteDeadline(time.Now().Add(cn.clientMaxWriteDeadline))
+	//		if err := cn.buffWriter.Flush(); err != nil {
+	//			conn.SetWriteDeadline(time.Time{})
+	//			return err
+	//		}
+	//		conn.SetWriteDeadline(time.Time{})
+	//	}
+	//
+	//	// write length header first.
+	//	header := make([]byte, mnet.HeaderLength)
+	//	binary.BigEndian.PutUint32(header, uint32(incoming))
+	//	cn.buffWriter.Write(header)
+	//
+	//	// then flush data alongside header.
+	//	_, err := w.WriteTo(cn.buffWriter)
+	//	return err
+	//}), nil
+
+	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&cn.MessageWritten, 1)
-		atomic.AddInt64(&cn.totalWritten, int64(incoming))
+		atomic.AddInt64(&cn.totalWritten, int64(len(data)))
 
 		cn.bu.Lock()
 		defer cn.bu.Unlock()
@@ -335,7 +373,7 @@ func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, erro
 		atomic.AddInt64(&cn.totalFlushed, int64(buffered))
 
 		// size of next write.
-		toWrite := buffered + incoming
+		toWrite := buffered + len(data)
 
 		// add size header
 		toWrite += mnet.HeaderLength
@@ -349,15 +387,16 @@ func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, erro
 			conn.SetWriteDeadline(time.Time{})
 		}
 
-		// write length header first.
-		header := make([]byte, mnet.HeaderLength)
-		binary.BigEndian.PutUint32(header, uint32(incoming))
-		cn.buffWriter.Write(header)
+		if _, err := cn.buffWriter.Write(size); err != nil {
+			return err
+		}
 
-		// then flush data alongside header.
-		_, err := w.WriteTo(cn.buffWriter)
-		return err
-	}), nil
+		if _, err := cn.buffWriter.Write(data); err != nil {
+			return err
+		}
+
+		return nil
+	}, mnet.HeaderLength, inSize), nil
 }
 
 func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
@@ -393,9 +432,11 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 	defer cn.close(cm)
 	defer cn.worker.Done()
 
-	incoming := make([]byte, mnet.MinBufferSize)
+	connReader := bufio.NewReaderSize(conn, cn.clientMaxWriteSize)
+	lreader := internal.NewLengthReader(connReader, mnet.HeaderLength)
+
 	for {
-		nn, err := conn.Read(incoming)
+		incoming, err := lreader.Read()
 		if err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
@@ -409,47 +450,24 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 		cn.metrics.Emit(
 			metrics.WithID(cn.id),
 			metrics.With("network", cn.nid),
-			metrics.With("length", nn),
-			metrics.With("data", string(incoming[:nn])),
+			metrics.With("length", len(incoming)),
+			metrics.With("data", string(incoming)),
 			metrics.Message("received new message"),
 		)
-		atomic.AddInt64(&cn.totalRead, int64(nn))
+		atomic.AddInt64(&cn.totalRead, int64(len(incoming)))
 
 		// if we fail to parse the data then we error out.
-		if err := cn.parser.Parse(incoming[:nn]); err != nil {
+		if err := cn.parser.Parse(incoming); err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
 				metrics.With("network", cn.nid),
-				metrics.With("length", nn),
-				metrics.With("data", string(incoming[:nn])),
+				metrics.With("length", len(incoming)),
+				metrics.With("data", string(incoming)),
 				metrics.Message("Parser: failed to parse data"),
 			)
 			return
 		}
-
-		// Lets resize buffer within area.
-		//if nn < mnet.MinBufferSize && nn < mnet.MinBufferSize/2 {
-		//	incoming = make([]byte, mnet.MinBufferSize/2, mnet.MinBufferSize)
-		//	continue
-		//}
-
-		if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
-			incoming = make([]byte, mnet.MinBufferSize*2)
-			continue
-		}
-
-		if nn > mnet.MinBufferSize && nn <= cn.clientMaxWriteSize/2 {
-			incoming = make([]byte, cn.clientMaxWriteSize/2)
-			continue
-		}
-
-		if nn > mnet.MinBufferSize && nn >= cn.clientMaxWriteSize/2 {
-			incoming = make([]byte, cn.clientMaxWriteSize)
-			continue
-		}
-
-		incoming = make([]byte, mnet.MinBufferSize)
 	}
 }
 
@@ -528,17 +546,6 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	cn.bu.Lock()
 	cn.buffWriter = bufio.NewWriterSize(conn, cn.clientMaxWriteSize)
 	cn.bu.Unlock()
-
-	// if offline buffer has data written in, before new connection was started,
-	// meaning we have offline data, then first flush this in, then set up new connection as
-	// writer. But if error in write occurs like short write, then set back scratch as buff's
-	// writer, write back data which was not written then return error.
-	//if cn.scratch.Len() != 0 {
-	//	if _, werr := cn.scratch.WriteTo(conn); werr != nil {
-	//		cn.buffWriter.Reset(cn.scratch)
-	//		return werr
-	//	}
-	//}
 
 	cn.bu.Lock()
 	cn.buffWriter.Reset(conn)

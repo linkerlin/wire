@@ -335,7 +335,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	defer sc.close(mnet.Client{})
 	defer sc.waiter.Done()
 
-	incoming := make([]byte, mnet.MinBufferSize)
+	lreader := internal.NewLengthReader(reader, mnet.HeaderLength, sc.maxWrite)
 
 	for {
 		frame, err := reader.NextFrame()
@@ -350,11 +350,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			return
 		}
 
-		if int(frame.Length) > len(incoming) && int(frame.Length) > len(incoming) {
-			incoming = make([]byte, frame.Length)
-		}
-
-		nn, err := reader.Read(incoming)
+		incoming, err := lreader.Read()
 		if err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
@@ -368,46 +364,26 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 		sc.metrics.Send(metrics.Entry{
 			Message: "Received websocket message",
 			Field: metrics.Field{
-				"data": string(incoming[:nn]),
+				"data":   string(incoming),
+				"length": len(incoming),
+				"frame":  frame,
 			},
 		})
 
-		atomic.AddInt64(&sc.totalRead, int64(nn))
+		atomic.AddInt64(&sc.totalRead, int64(len(incoming)))
 
 		// Send into go-routine (critical path)?
-		if err := sc.parser.Parse(incoming[:nn]); err != nil {
+		if err := sc.parser.Parse(incoming); err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
-				metrics.With("message", string(incoming[:nn])),
+				metrics.With("length", len(incoming)),
+				metrics.With("message", string(incoming)),
 				metrics.Message("Connection failed to read: closing"),
 				metrics.With("network", sc.nid),
 			)
 			return
 		}
-
-		// Lets resize buffer within area.
-		//if nn < mnet.MinBufferSize {
-		//	incoming = make([]byte, mnet.MinBufferSize/2)
-		//	continue
-		//}
-
-		if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
-			incoming = make([]byte, mnet.MinBufferSize*2)
-			continue
-		}
-
-		if nn > mnet.MinBufferSize && nn <= sc.maxWrite/2 {
-			incoming = make([]byte, sc.maxWrite/2)
-			continue
-		}
-
-		if nn > mnet.MinBufferSize && nn >= sc.maxWrite/2 {
-			incoming = make([]byte, sc.maxWrite)
-			continue
-		}
-
-		incoming = make([]byte, mnet.MinBufferSize)
 	}
 }
 

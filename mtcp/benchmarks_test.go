@@ -100,7 +100,7 @@ func benchThis(b *testing.B, payload []byte) {
 
 	payloadLen := len(payload)
 	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createBenchmarkNetwork(ctx, "localhost:5050", nil)
+	netw, err := createBenchmarkNetwork(ctx, "localhost:5050", nil, defaultClientSize)
 	if err != nil {
 		b.Fatalf("Failed to create network: %+q", err)
 		return
@@ -132,11 +132,12 @@ func benchThis(b *testing.B, payload []byte) {
 	netw.Wait()
 }
 
-func createBenchmarkNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.TCPNetwork, error) {
+func createBenchmarkNetwork(ctx context.Context, addr string, config *tls.Config, size int) (*mtcp.TCPNetwork, error) {
 	var netw mtcp.TCPNetwork
 	netw.Addr = addr
-	netw.Metrics = events
 	netw.TLS = config
+	netw.Metrics = events
+	netw.MaxWriteSize = size
 	netw.MaxWriteDeadline = 1 * time.Second
 
 	netw.Handler = func(client mnet.Client) error {
@@ -165,10 +166,10 @@ func sizedPayloadString(sz int) string {
 }
 
 func sizedPayload(sz int) []byte {
-	payload := make([]byte, len(pub)+2+sz)
+	payload := make([]byte, len(pub)+3+sz)
 	n := copy(payload, pub)
 	n += copy(payload[n:], sizedBytes(sz))
-	n += copy(payload, []byte("\r\n"))
+	n += copy(payload, []byte(" \r\n"))
 	return payload[:n]
 }
 
