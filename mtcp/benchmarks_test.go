@@ -166,10 +166,10 @@ func sizedPayloadString(sz int) string {
 }
 
 func sizedPayload(sz int) []byte {
-	payload := make([]byte, len(pub)+3+sz)
+	payload := make([]byte, len(pub)+2+sz)
 	n := copy(payload, pub)
 	n += copy(payload[n:], sizedBytes(sz))
-	n += copy(payload, []byte(" \r\n"))
+	n += copy(payload, []byte("\r\n"))
 	return payload[:n]
 }
 

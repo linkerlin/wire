@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,7 +17,6 @@ import (
 	"github.com/gobwas/ws/wsutil"
 	"github.com/influx6/faux/metrics"
 	"github.com/influx6/faux/netutils"
-	"github.com/influx6/faux/pools/done"
 	"github.com/influx6/melon"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/internal"
@@ -32,7 +30,6 @@ var (
 	rinfoBytes              = []byte(mnet.RINFO)
 	clStatusBytes           = []byte(mnet.CLSTATUS)
 	handshakeCompletedBytes = []byte(mnet.CLHANDSHAKECOMPLETED)
-	bufferPool              = done.NewDonePool(218, 20)
 )
 
 //************************************************************************
@@ -109,9 +106,9 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 	conn = sc.conn
 	sc.cu.Unlock()
 
-	return bufferPool.Get(size, func(d int, from io.WriterTo) error {
-		atomic.AddInt64(&sc.totalWriteMsgs, 1)
-		atomic.AddInt64(&sc.totalWritten, int64(d))
+	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
+		atomic.AddInt64(&sc.totalReadMsgs, 1)
+		atomic.AddInt64(&sc.totalWritten, int64(len(data)))
 
 		sc.bu.Lock()
 		defer sc.bu.Unlock()
@@ -120,11 +117,12 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 			return mnet.ErrAlreadyClosed
 		}
 
+		//available := sc.wsWriter.Available()
 		buffered := sc.wsWriter.Buffered()
 		atomic.AddInt64(&sc.totalFlushOut, int64(buffered))
 
 		// size of next write.
-		toWrite := buffered + d
+		toWrite := buffered + len(data)
 
 		// add size header
 		toWrite += mnet.HeaderLength
@@ -144,15 +142,16 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 			conn.SetWriteDeadline(time.Time{})
 		}
 
-		// write length header first.
-		header := make([]byte, mnet.HeaderLength)
-		binary.BigEndian.PutUint32(header, uint32(d))
-		sc.wsWriter.Write(header)
+		if _, err := sc.wsWriter.Write(size); err != nil {
+			return err
+		}
 
-		// then flush data alongside header.
-		_, err := from.WriteTo(sc.wsWriter)
-		return err
-	}), nil
+		if _, err := sc.wsWriter.Write(data); err != nil {
+			return err
+		}
+
+		return nil
+	}, mnet.HeaderLength, size), nil
 }
 
 func (sc *websocketServerClient) isAlive(_ mnet.Client) error {
@@ -294,10 +293,6 @@ func (sc *websocketServerClient) close(mn mnet.Client) error {
 
 	sc.flush(mn)
 
-	//sc.bu.Lock()
-	//sc.wsWriter.Reset(nil, wsState, ws.OpBinary)
-	//sc.bu.Unlock()
-
 	var err error
 	sc.cu.Lock()
 	if sc.conn != nil {
@@ -335,10 +330,13 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	defer sc.close(mnet.Client{})
 	defer sc.waiter.Done()
 
-	lreader := internal.NewLengthReader(reader, mnet.HeaderLength, sc.maxWrite)
+	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
+
+	incoming := make([]byte, mnet.SmallestMinBufferSize)
 
 	for {
-		frame, err := reader.NextFrame()
+
+		wsframe, err := reader.NextFrame()
 		if err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
@@ -350,11 +348,31 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			return
 		}
 
-		incoming, err := lreader.Read()
+		frame, err := lreader.ReadHeader()
 		if err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
+				metrics.With("ws-frame", wsframe),
+				metrics.With("frame", frame),
+				metrics.Message("Connection failed to read data frame"),
+				metrics.With("network", sc.nid),
+			)
+			return
+		}
+
+		if frame > len(incoming) {
+			incoming = make([]byte, frame)
+		}
+
+		n, err := lreader.Read(incoming)
+		if err != nil {
+			sc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(sc.id),
+				metrics.With("read-length", n),
+				metrics.With("length", len(incoming[:n])),
+				metrics.With("data", string(incoming[:n])),
 				metrics.Message("Connection failed to read: closing"),
 				metrics.With("network", sc.nid),
 			)
@@ -364,26 +382,49 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 		sc.metrics.Send(metrics.Entry{
 			Message: "Received websocket message",
 			Field: metrics.Field{
-				"data":   string(incoming),
-				"length": len(incoming),
-				"frame":  frame,
+				"data":     string(incoming[:n]),
+				"length":   len(incoming[:n]),
+				"frame":    frame,
+				"ws-frame": wsframe,
 			},
 		})
 
-		atomic.AddInt64(&sc.totalRead, int64(len(incoming)))
+		atomic.AddInt64(&sc.totalRead, int64(len(incoming[:n])))
 
 		// Send into go-routine (critical path)?
-		if err := sc.parser.Parse(incoming); err != nil {
+		if err := sc.parser.Parse(incoming[:n]); err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
-				metrics.With("length", len(incoming)),
-				metrics.With("message", string(incoming)),
-				metrics.Message("Connection failed to read: closing"),
+				metrics.Message("ParseError"),
 				metrics.With("network", sc.nid),
+				metrics.With("length", len(incoming)),
+				metrics.With("data", string(incoming)),
 			)
 			return
 		}
+
+		if n > mnet.SmallestMinBufferSize && n <= mnet.MinBufferSize {
+			incoming = make([]byte, mnet.MinBufferSize)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= mnet.MinBufferSize*2 {
+			incoming = make([]byte, mnet.MinBufferSize*2)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= sc.maxWrite/2 {
+			incoming = make([]byte, sc.maxWrite/2)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= sc.maxWrite {
+			incoming = make([]byte, sc.maxWrite)
+			continue
+		}
+
+		incoming = make([]byte, mnet.SmallestMinBufferSize)
 	}
 }
 

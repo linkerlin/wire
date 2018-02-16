@@ -18,7 +18,6 @@ import (
 
 	"github.com/influx6/faux/metrics"
 	"github.com/influx6/faux/netutils"
-	"github.com/influx6/faux/pools/done"
 	"github.com/influx6/melon"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/internal"
@@ -31,7 +30,6 @@ var (
 	rinfoBytes              = []byte(mnet.RINFO)
 	clStatusBytes           = []byte(mnet.CLSTATUS)
 	handshakeCompletedBytes = []byte(mnet.CLHANDSHAKECOMPLETED)
-	bufferPool              = done.NewDonePool(218, 20)
 )
 
 //************************************************************************

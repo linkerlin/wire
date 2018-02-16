@@ -119,7 +119,7 @@ func (lw *LengthWriter) Close() error {
 		return err
 	}
 
-	bytespool.Put(lw.buff)
+	bytespool.Put(lw.buff[0:cap(lw.buff)])
 
 	lw.w = nil
 	lw.buff = nil
@@ -218,7 +218,7 @@ func (lw *ActionLengthWriter) Close() error {
 
 	err := lw.wx(lw.area, lw.buff[0:lw.n])
 
-	bytespool.Put(lw.buff)
+	bytespool.Put(lw.buff[0:cap(lw.buff)])
 
 	switch lw.ty {
 	case 2:
