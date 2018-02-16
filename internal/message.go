@@ -51,7 +51,7 @@ type TaggedMessages struct {
 // Parse implements the necessary procedure for parsing incoming data and
 // appropriately splitting them accordingly to their respective parts.
 func (smp *TaggedMessages) Parse(d []byte) error {
-	msg := messagePool.New().(*messageTomb)
+	msg := messagePool.Get().(*messageTomb)
 	msg.Data = d
 
 	smp.mu.Lock()
@@ -87,7 +87,6 @@ func (smp *TaggedMessages) Next() ([]byte, error) {
 	}
 
 	data := head.Data
-
 	head.Data = nil
 	smp.mu.RUnlock()
 
