@@ -402,46 +402,6 @@ func (nc *tcpServerClient) write(cm mnet.Client, inSize int) (io.WriteCloser, er
 		return nil, mnet.ErrAlreadyClosed
 	}
 
-	//return bufferPool.Get(inSize, func(incoming int, w io.WriterTo) error {
-	//	atomic.AddInt64(&nc.totalWriteMsgs, 1)
-	//	atomic.AddInt64(&nc.totalWritten, int64(incoming))
-	//
-	//	nc.bu.Lock()
-	//	defer nc.bu.Unlock()
-	//
-	//	if nc.buffWriter == nil {
-	//		return mnet.ErrAlreadyClosed
-	//	}
-	//
-	//	//available := nc.buffWriter.Available()
-	//	buffered := nc.buffWriter.Buffered()
-	//	atomic.AddInt64(&nc.totalFlushOut, int64(buffered))
-	//
-	//	// size of next write.
-	//	toWrite := buffered + incoming
-	//
-	//	// add size header
-	//	toWrite += mnet.HeaderLength
-	//
-	//	if toWrite >= nc.maxWrite {
-	//		conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
-	//		if err := nc.buffWriter.Flush(); err != nil {
-	//			conn.SetWriteDeadline(time.Time{})
-	//			return err
-	//		}
-	//		conn.SetWriteDeadline(time.Time{})
-	//	}
-	//
-	//	// write length header first.
-	//	header := make([]byte, mnet.HeaderLength)
-	//	binary.BigEndian.PutUint32(header, uint32(incoming))
-	//	nc.buffWriter.Write(header)
-	//
-	//	// then flush data alongside header.
-	//	_, err := w.WriteTo(nc.buffWriter)
-	//	return err
-	//}), nil
-
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&nc.totalWritten, 1)
 		atomic.AddInt64(&nc.totalWritten, int64(len(data)))
@@ -547,26 +507,45 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 	nc.mu.RUnlock()
 
 	connReader := bufio.NewReaderSize(cn, nc.maxWrite)
-	lreader := internal.NewLengthReader(connReader, mnet.HeaderLength)
+	lreader := internal.NewLengthRecvReader(connReader, mnet.HeaderLength)
+
+	incoming := make([]byte, mnet.SmallestMinBufferSize)
 
 	for {
-		incoming, err := lreader.Read()
+		frame, err := lreader.ReadHeader()
 		if err != nil {
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
-				metrics.With("length", len(incoming)),
-				metrics.With("data", string(incoming)),
+				metrics.With("frame", frame),
+				metrics.Message("Connection failed to read data frame"),
+				metrics.With("network", nc.nid),
+			)
+			return
+		}
+
+		if frame > len(incoming) {
+			incoming = make([]byte, frame)
+		}
+
+		n, err := lreader.Read(incoming)
+		if err != nil {
+			nc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(nc.id),
+				metrics.With("read-length", n),
+				metrics.With("length", len(incoming[:n])),
+				metrics.With("data", string(incoming[:n])),
 				metrics.Message("Connection failed to read: closing"),
 				metrics.With("network", nc.nid),
 			)
 			return
 		}
 
-		atomic.AddInt64(&nc.totalRead, int64(len(incoming)))
+		atomic.AddInt64(&nc.totalRead, int64(len(incoming[:n])))
 
 		// Send into go-routine (critical path)?
-		if err := nc.parser.Parse(incoming); err != nil {
+		if err := nc.parser.Parse(incoming[:n]); err != nil {
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
@@ -577,6 +556,28 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 			)
 			return
 		}
+
+		if n > mnet.SmallestMinBufferSize && n <= mnet.MinBufferSize {
+			incoming = make([]byte, mnet.MinBufferSize)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= mnet.MinBufferSize*2 {
+			incoming = make([]byte, mnet.MinBufferSize*2)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= nc.maxWrite/2 {
+			incoming = make([]byte, nc.maxWrite/2)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= nc.maxWrite {
+			incoming = make([]byte, nc.maxWrite)
+			continue
+		}
+
+		incoming = make([]byte, mnet.SmallestMinBufferSize)
 	}
 }
 

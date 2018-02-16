@@ -19,6 +19,10 @@ const (
 	// read loop.
 	MinBufferSize = 512
 
+	// SmallestMinBufferSize sets the smallest buffer size acceptable for
+	// reading.
+	SmallestMinBufferSize = 128
+
 	// MaxBufferSize sets the maximum size allowed for all reads
 	// used in the readloop of a client's net.Conn.
 	MaxBufferSize = 69560

@@ -3,6 +3,31 @@ package internal
 import (
 	"encoding/binary"
 	"io"
+	"sync"
+
+	"github.com/influx6/faux/pools/pbytes"
+)
+
+var (
+	bit2Pool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 2)
+		},
+	}
+
+	bit4Pool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 4)
+		},
+	}
+
+	bit8Pool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 8)
+		},
+	}
+
+	bytespool = pbytes.NewBytesPool(218, 20)
 )
 
 //**********************************************************************
@@ -26,18 +51,38 @@ type LengthWriter struct {
 // which represent either a int16(where size is 2), int32(where size is 4),
 // int64(where size is 8) is used.
 func NewLengthWriter(w io.Writer, size int, dataLength int) *LengthWriter {
+	var area []byte
+
+	switch size {
+	case 2:
+		area = bit2Pool.Get().([]byte)
+	case 4:
+		area = bit4Pool.Get().([]byte)
+	case 8:
+		area = bit8Pool.Get().([]byte)
+	}
+
 	return &LengthWriter{
 		w:    w,
 		ty:   size,
 		max:  dataLength,
-		area: make([]byte, size),
-		buff: make([]byte, dataLength),
+		area: area,
+		buff: bytespool.Get(dataLength),
 	}
 }
 
 // Close closes this writer and flushes data into underline writer.
 func (lw *LengthWriter) Close() error {
 	if lw.n == 0 {
+		switch lw.ty {
+		case 2:
+			bit2Pool.Put(lw.area)
+		case 4:
+			bit4Pool.Put(lw.area)
+		case 8:
+			bit8Pool.Put(lw.area)
+		}
+
 		lw.w = nil
 		lw.area = nil
 		lw.buff = nil
@@ -58,12 +103,27 @@ func (lw *LengthWriter) Close() error {
 		return err
 	}
 
-	dataW, err := lw.w.Write(lw.buff[:lw.n])
+	switch lw.ty {
+	case 2:
+		bit2Pool.Put(lw.area)
+	case 4:
+		bit4Pool.Put(lw.area)
+	case 8:
+		bit8Pool.Put(lw.area)
+	}
+
+	lw.area = nil
+
+	dataW, err := lw.w.Write(lw.buff[0:lw.n])
 	if err != nil {
 		return err
 	}
 
+	bytespool.Put(lw.buff)
+
 	lw.w = nil
+	lw.buff = nil
+
 	if sizeW+dataW != lw.max+lw.ty {
 		return io.ErrShortWrite
 	}
@@ -109,18 +169,38 @@ type ActionLengthWriter struct {
 // which represent either a int16(where size is 2), int32(where size is 4),
 // int64(where size is 8) is used.
 func NewActionLengthWriter(wx WriterAction, size int, dataLength int) *ActionLengthWriter {
+	var area []byte
+
+	switch size {
+	case 2:
+		area = bit2Pool.Get().([]byte)
+	case 4:
+		area = bit4Pool.Get().([]byte)
+	case 8:
+		area = bit8Pool.Get().([]byte)
+	}
+
 	return &ActionLengthWriter{
 		wx:   wx,
 		ty:   size,
 		max:  dataLength,
-		area: make([]byte, size),
-		buff: make([]byte, dataLength),
+		area: area,
+		buff: bytespool.Get(dataLength),
 	}
 }
 
 // Close closes this writer and flushes data into underline writer.
 func (lw *ActionLengthWriter) Close() error {
 	if lw.n == 0 {
+		switch lw.ty {
+		case 2:
+			bit2Pool.Put(lw.area)
+		case 4:
+			bit4Pool.Put(lw.area)
+		case 8:
+			bit8Pool.Put(lw.area)
+		}
+
 		lw.wx = nil
 		lw.area = nil
 		lw.buff = nil
@@ -136,14 +216,23 @@ func (lw *ActionLengthWriter) Close() error {
 		binary.BigEndian.PutUint64(lw.area, uint64(lw.n))
 	}
 
-	if err := lw.wx(lw.area, lw.buff[:lw.n]); err != nil {
-		return err
+	err := lw.wx(lw.area, lw.buff[0:lw.n])
+
+	bytespool.Put(lw.buff)
+
+	switch lw.ty {
+	case 2:
+		bit2Pool.Put(lw.area)
+	case 4:
+		bit4Pool.Put(lw.area)
+	case 8:
+		bit8Pool.Put(lw.area)
 	}
 
 	lw.wx = nil
 	lw.area = nil
 	lw.buff = nil
-	return nil
+	return err
 }
 
 // Write will attempt to copy data within provided slice into writers

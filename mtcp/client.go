@@ -52,7 +52,7 @@ func WriteInterval(dur time.Duration) ConnectOptions {
 // as its maximum buffer size for it's writer.
 func MaxBuffer(buffer int) ConnectOptions {
 	return func(cm *clientNetwork) {
-		cm.clientMaxWriteSize = buffer
+		cm.maxWrite = buffer
 	}
 }
 
@@ -124,8 +124,8 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.keepAliveTimeout = mnet.DefaultKeepAlive
 	}
 
-	if network.clientMaxWriteSize <= 0 {
-		network.clientMaxWriteSize = mnet.MaxBufferSize
+	if network.maxWrite <= 0 {
+		network.maxWrite = mnet.MaxBufferSize
 	}
 
 	if network.clientMaxWriteDeadline <= 0 {
@@ -174,11 +174,12 @@ type clientNetwork struct {
 	dialTimeout      time.Duration
 	keepAliveTimeout time.Duration
 
-	clientMaxWriteSize     int
+	maxWrite               int
 	clientMaxWriteDeadline time.Duration
 
-	parser     *internal.TaggedMessages
-	streams    *internal.StreamedMessages
+	parser  *internal.TaggedMessages
+	streams *internal.StreamedMessages
+
 	bu         sync.Mutex
 	buffWriter *bufio.Writer
 
@@ -225,7 +226,7 @@ func (cn *clientNetwork) getInfo(cm mnet.Client) mnet.Info {
 		ID:         cn.id,
 		ServerAddr: addr,
 		MinBuffer:  mnet.MinBufferSize,
-		MaxBuffer:  int64(cn.clientMaxWriteSize),
+		MaxBuffer:  int64(cn.maxWrite),
 	}
 }
 
@@ -317,46 +318,6 @@ func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, erro
 		return nil, mnet.ErrAlreadyClosed
 	}
 
-	//return bufferPool.Get(inSize, func(incoming int, w io.WriterTo) error {
-	//	atomic.AddInt64(&cn.MessageWritten, 1)
-	//	atomic.AddInt64(&cn.totalWritten, int64(incoming))
-	//
-	//	cn.bu.Lock()
-	//	defer cn.bu.Unlock()
-	//
-	//	if cn.buffWriter == nil {
-	//		return mnet.ErrAlreadyClosed
-	//	}
-	//
-	//	//available := cn.buffWriter.Available()
-	//	buffered := cn.buffWriter.Buffered()
-	//	atomic.AddInt64(&cn.totalFlushed, int64(buffered))
-	//
-	//	// size of next write.
-	//	toWrite := buffered + incoming
-	//
-	//	// add size header
-	//	toWrite += mnet.HeaderLength
-	//
-	//	if toWrite >= cn.clientMaxWriteSize {
-	//		conn.SetWriteDeadline(time.Now().Add(cn.clientMaxWriteDeadline))
-	//		if err := cn.buffWriter.Flush(); err != nil {
-	//			conn.SetWriteDeadline(time.Time{})
-	//			return err
-	//		}
-	//		conn.SetWriteDeadline(time.Time{})
-	//	}
-	//
-	//	// write length header first.
-	//	header := make([]byte, mnet.HeaderLength)
-	//	binary.BigEndian.PutUint32(header, uint32(incoming))
-	//	cn.buffWriter.Write(header)
-	//
-	//	// then flush data alongside header.
-	//	_, err := w.WriteTo(cn.buffWriter)
-	//	return err
-	//}), nil
-
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&cn.MessageWritten, 1)
 		atomic.AddInt64(&cn.totalWritten, int64(len(data)))
@@ -378,7 +339,7 @@ func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, erro
 		// add size header
 		toWrite += mnet.HeaderLength
 
-		if toWrite >= cn.clientMaxWriteSize {
+		if toWrite >= cn.maxWrite {
 			conn.SetWriteDeadline(time.Now().Add(cn.clientMaxWriteDeadline))
 			if err := cn.buffWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
@@ -432,42 +393,78 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 	defer cn.close(cm)
 	defer cn.worker.Done()
 
-	connReader := bufio.NewReaderSize(conn, cn.clientMaxWriteSize)
-	lreader := internal.NewLengthReader(connReader, mnet.HeaderLength)
+	connReader := bufio.NewReaderSize(conn, cn.maxWrite)
+	lreader := internal.NewLengthRecvReader(connReader, mnet.HeaderLength)
+
+	incoming := make([]byte, mnet.SmallestMinBufferSize)
 
 	for {
-		incoming, err := lreader.Read()
+		frame, err := lreader.ReadHeader()
 		if err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
+				metrics.With("frame", frame),
+				metrics.Message("Connection failed to read data frame"),
 				metrics.With("network", cn.nid),
-				metrics.Message("Connection failed to read: closing"),
 			)
 			return
 		}
 
-		cn.metrics.Emit(
-			metrics.WithID(cn.id),
-			metrics.With("network", cn.nid),
-			metrics.With("length", len(incoming)),
-			metrics.With("data", string(incoming)),
-			metrics.Message("received new message"),
-		)
-		atomic.AddInt64(&cn.totalRead, int64(len(incoming)))
+		if frame > len(incoming) {
+			incoming = make([]byte, frame)
+		}
 
-		// if we fail to parse the data then we error out.
-		if err := cn.parser.Parse(incoming); err != nil {
+		n, err := lreader.Read(incoming)
+		if err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
+				metrics.With("read-length", n),
+				metrics.With("length", len(incoming[:n])),
+				metrics.With("data", string(incoming[:n])),
+				metrics.Message("Connection failed to read: closing"),
 				metrics.With("network", cn.nid),
-				metrics.With("length", len(incoming)),
-				metrics.With("data", string(incoming)),
-				metrics.Message("Parser: failed to parse data"),
 			)
 			return
 		}
+
+		atomic.AddInt64(&cn.totalRead, int64(len(incoming[:n])))
+
+		// Send into go-routine (critical path)?
+		if err := cn.parser.Parse(incoming[:n]); err != nil {
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.Message("ParseError"),
+				metrics.With("network", cn.nid),
+				metrics.With("length", len(incoming)),
+				metrics.With("data", string(incoming)),
+			)
+			return
+		}
+
+		if n > mnet.SmallestMinBufferSize && n <= mnet.MinBufferSize {
+			incoming = make([]byte, mnet.MinBufferSize)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= mnet.MinBufferSize*2 {
+			incoming = make([]byte, mnet.MinBufferSize*2)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= cn.maxWrite/2 {
+			incoming = make([]byte, cn.maxWrite/2)
+			continue
+		}
+
+		if n > mnet.MinBufferSize && n <= cn.maxWrite {
+			incoming = make([]byte, cn.maxWrite)
+			continue
+		}
+
+		incoming = make([]byte, mnet.SmallestMinBufferSize)
 	}
 }
 
@@ -544,7 +541,7 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	atomic.StoreInt64(&cn.closed, 0)
 
 	cn.bu.Lock()
-	cn.buffWriter = bufio.NewWriterSize(conn, cn.clientMaxWriteSize)
+	cn.buffWriter = bufio.NewWriterSize(conn, cn.maxWrite)
 	cn.bu.Unlock()
 
 	cn.bu.Lock()

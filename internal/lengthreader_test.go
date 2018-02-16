@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"testing"
 
 	"io"
@@ -12,6 +11,124 @@ import (
 	"github.com/influx6/faux/tests"
 	"github.com/influx6/mnet/internal"
 )
+
+func TestLengthRecvReader_MultiRead(t *testing.T) {
+	msg1 := buildMessage(10)
+	reader := bytes.NewBuffer(makeMessage(string(msg1), 2))
+	lr := internal.NewLengthRecvReader(reader, 2)
+
+	_, err := lr.Read(nil)
+	if err != internal.ErrReadStateError {
+		tests.FailedWithError(err, "Should have failed to read first before calling ReadHeader")
+	}
+	tests.Passed("Should have failed to read first before calling ReadHeader")
+
+	length, err := lr.ReadHeader()
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully read header from reader")
+	}
+	tests.Passed("Should have successfully read header from reader")
+
+	half := length / 2
+	incoming := make([]byte, half)
+	n, err := lr.Read(incoming)
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully read data from reader")
+	}
+	tests.Passed("Should have successfully read data from reader")
+
+	if n != half {
+		tests.Info("Received: %d", n)
+		tests.Info("Expected: %d", half)
+		tests.Failed("Should have received a giving length of data")
+	}
+	tests.Passed("Should have received a giving length of data")
+
+	if !bytes.Equal(msg1[:half], incoming) {
+		tests.Info("Received: %#v", incoming)
+		tests.Info("Expected: %#v", msg1[:half])
+		tests.Failed("Should have successfully matched first message with expected")
+	}
+	tests.Passed("Should have successfully matched first message with expected")
+
+	_, err = lr.ReadHeader()
+	if err != internal.ErrPendingReads {
+		tests.FailedWithError(err, "Should have failed to read next header will unfinished data")
+	}
+	tests.Passed("Should have failed to read next header will unfinished data")
+
+	incoming2 := make([]byte, half)
+	n, err = lr.Read(incoming2)
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully read data from reader")
+	}
+	tests.Passed("Should have successfully read data from reader")
+
+	if n != half {
+		tests.Info("Received: %d", n)
+		tests.Info("Expected: %d", half)
+		tests.Failed("Should have received a giving length of data")
+	}
+	tests.Passed("Should have received a giving length of data")
+
+	if !bytes.Equal(msg1[half:], incoming2) {
+		tests.Info("Received: %#v", incoming)
+		tests.Info("Expected: %#v", msg1[half:])
+		tests.Failed("Should have successfully matched second message with expected")
+	}
+	tests.Passed("Should have successfully matched second message with expected")
+
+	_, err = lr.ReadHeader()
+	if err != io.EOF {
+		tests.FailedWithError(err, "Should have successfully reach end of reader")
+	}
+	tests.Passed("Should have successfully reach end of reader")
+}
+
+func TestLengthRecvReader_SingleRead(t *testing.T) {
+	msg1 := buildMessage(10)
+	reader := bytes.NewBuffer(makeMessage(string(msg1), 2))
+	lr := internal.NewLengthRecvReader(reader, 2)
+
+	_, err := lr.Read(nil)
+	if err != internal.ErrReadStateError {
+		tests.FailedWithError(err, "Should have failed to read first before calling ReadHeader")
+	}
+	tests.Passed("Should have failed to read first before calling ReadHeader")
+
+	length, err := lr.ReadHeader()
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully read header from reader")
+	}
+	tests.Passed("Should have successfully read header from reader")
+
+	incoming := make([]byte, length)
+	n, err := lr.Read(incoming)
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully read data from reader")
+	}
+	tests.Passed("Should have successfully read data from reader")
+
+	if n != length {
+		tests.Info("Received: %d", n)
+		tests.Info("Expected: %d", length)
+		tests.Failed("Should have received a giving length of data")
+	}
+	tests.Passed("Should have received a giving length of data")
+
+	if !bytes.Equal(msg1, incoming) {
+		tests.Info("Received: %#v", incoming)
+		tests.Info("Expected: %#v", msg1)
+		tests.Failed("Should have successfully matched first message with expected")
+	}
+	tests.Passed("Should have successfully matched first message with expected")
+
+	_, err = lr.ReadHeader()
+	if err != io.EOF {
+		tests.FailedWithError(err, "Should have successfully reach end of reader")
+	}
+	tests.Passed("Should have successfully reach end of reader")
+}
 
 func TestLengthReader_Header2(t *testing.T) {
 	msg1 := buildMessage(10)
@@ -21,7 +138,6 @@ func TestLengthReader_Header2(t *testing.T) {
 	lr := internal.NewLengthReader(reader, 2)
 
 	rec1, err := lr.Read()
-	fmt.Printf("Length %d -> %d :: %+q\n", len(rec1), len(msg1), err)
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully read first message")
 	}
