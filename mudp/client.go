@@ -295,10 +295,10 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 			}
 
 			// Lets resize buffer within area.
-			//if nn < mnet.MinBufferSize {
-			//	incoming = make([]byte, mnet.MinBufferSize/2)
-			//	continue
-			//}
+			if nn < mnet.MinBufferSize {
+				incoming = make([]byte, mnet.MinBufferSize/2)
+				continue
+			}
 
 			if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
 				incoming = make([]byte, mnet.MinBufferSize*2)

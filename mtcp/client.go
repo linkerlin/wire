@@ -411,9 +411,7 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 			return
 		}
 
-		if frame > len(incoming) {
-			incoming = make([]byte, frame)
-		}
+		incoming = make([]byte, frame)
 
 		n, err := lreader.Read(incoming)
 		if err != nil {
@@ -443,28 +441,6 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 			)
 			return
 		}
-
-		if n > mnet.SmallestMinBufferSize && n <= mnet.MinBufferSize {
-			incoming = make([]byte, mnet.MinBufferSize)
-			continue
-		}
-
-		if n > mnet.MinBufferSize && n <= mnet.MinBufferSize*2 {
-			incoming = make([]byte, mnet.MinBufferSize*2)
-			continue
-		}
-
-		if n > mnet.MinBufferSize && n <= cn.maxWrite/2 {
-			incoming = make([]byte, cn.maxWrite/2)
-			continue
-		}
-
-		if n > mnet.MinBufferSize && n <= cn.maxWrite {
-			incoming = make([]byte, cn.maxWrite)
-			continue
-		}
-
-		incoming = make([]byte, mnet.SmallestMinBufferSize)
 	}
 }
 

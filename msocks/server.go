@@ -106,6 +106,8 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 	conn = sc.conn
 	sc.cu.Unlock()
 
+	//_ = conn
+
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&sc.totalReadMsgs, 1)
 		atomic.AddInt64(&sc.totalWritten, int64(len(data)))
@@ -336,7 +338,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 
 	for {
 
-		wsframe, err := reader.NextFrame()
+		wsFrame, err := reader.NextFrame()
 		if err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
@@ -353,17 +355,15 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
-				metrics.With("ws-frame", wsframe),
 				metrics.With("frame", frame),
+				metrics.With("ws-frame", wsFrame),
 				metrics.Message("Connection failed to read data frame"),
 				metrics.With("network", sc.nid),
 			)
 			return
 		}
 
-		if frame > len(incoming) {
-			incoming = make([]byte, frame)
-		}
+		incoming = make([]byte, frame)
 
 		n, err := lreader.Read(incoming)
 		if err != nil {
@@ -385,7 +385,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 				"data":     string(incoming[:n]),
 				"length":   len(incoming[:n]),
 				"frame":    frame,
-				"ws-frame": wsframe,
+				"ws-frame": wsFrame,
 			},
 		})
 
@@ -403,28 +403,6 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 			)
 			return
 		}
-
-		if n > mnet.SmallestMinBufferSize && n <= mnet.MinBufferSize {
-			incoming = make([]byte, mnet.MinBufferSize)
-			continue
-		}
-
-		if n > mnet.MinBufferSize && n <= mnet.MinBufferSize*2 {
-			incoming = make([]byte, mnet.MinBufferSize*2)
-			continue
-		}
-
-		if n > mnet.MinBufferSize && n <= sc.maxWrite/2 {
-			incoming = make([]byte, sc.maxWrite/2)
-			continue
-		}
-
-		if n > mnet.MinBufferSize && n <= sc.maxWrite {
-			incoming = make([]byte, sc.maxWrite)
-			continue
-		}
-
-		incoming = make([]byte, mnet.SmallestMinBufferSize)
 	}
 }
 

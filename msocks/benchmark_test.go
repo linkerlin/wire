@@ -141,8 +141,10 @@ func createBenchmarkNetwork(ctx context.Context, addr string) (*msocks.Websocket
 	netw.MaxDeadline = 3 * time.Second
 	netw.Handler = func(client mnet.Client) error {
 		for {
-			if _, err := client.Read(); err != nil {
+			_, err := client.Read()
+			if err != nil {
 				if err == mnet.ErrNoDataYet {
+					time.Sleep(300 * time.Millisecond)
 					continue
 				}
 				return err
