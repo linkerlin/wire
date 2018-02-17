@@ -447,6 +447,7 @@ func (sc *websocketServerClient) handleCLStatusReceive(cm mnet.Client, data []by
 	}
 
 	sc.srcInfo = &info
+	sc.network.registerCluster(info.ClusterNodes)
 
 	wc, err := sc.write(cm, len(handshakeCompletedBytes))
 	if err != nil {
@@ -520,6 +521,8 @@ func (sc *websocketServerClient) handleRINFO(data []byte) error {
 
 	info.Cluster = sc.isACluster
 	sc.srcInfo = &info
+
+	sc.network.registerCluster(info.ClusterNodes)
 	return nil
 }
 
@@ -898,6 +901,14 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 		n.Upgrader = &ws.Upgrader{}
 	}
 
+	if n.Dialer == nil {
+		n.Dialer = &ws.Dialer{
+			ReadBufferSize:  wsReadBuffer,
+			WriteBufferSize: wsWriteBuffer,
+			Timeout:         mnet.DefaultDialTimeout,
+		}
+	}
+
 	n.Addr = netutils.GetAddr(n.Addr)
 	if n.ServerName == "" {
 		host, _, _ := net.SplitHostPort(n.Addr)
@@ -969,16 +980,27 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 	return nil
 }
 
-var defaultDialer = &ws.Dialer{
-	Timeout:         time.Second * 2,
-	ReadBufferSize:  wsReadBuffer,
-	WriteBufferSize: wsWriteBuffer,
+func (n *WebsocketNetwork) registerCluster(clusters []mnet.Info) {
+	for _, cluster := range clusters {
+		if err := n.AddCluster(cluster.ServerAddr); err != nil {
+			n.Metrics.Send(metrics.Entry{
+				ID:      n.ID,
+				Level:   metrics.ErrorLvl,
+				Message: "Failed to add cluster addresss",
+				Field:   metrics.Field{"info": cluster, "nid": n.ID, "error": err},
+			})
+		}
+	}
 }
 
 // AddCluster attempts to add new connection to another mnet tcp server.
 // It will attempt to dial specified address returning an error if the
 // giving address failed or was not able to meet the handshake protocols.
 func (n *WebsocketNetwork) AddCluster(addr string) error {
+	if n.Addr == addr {
+		return nil
+	}
+
 	if !strings.HasPrefix(addr, "ws://") && !strings.HasPrefix(addr, "wss://") {
 		if n.TLS == nil {
 			addr = "ws://" + addr
@@ -987,18 +1009,7 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		}
 	}
 
-	var err error
-	var hs ws.Handshake
-	var conn net.Conn
-
-	if n.Dialer != nil {
-		conn, _, hs, err = n.Dialer.Dial(context.Background(), addr)
-	} else {
-		// Set the tls config just incase we have one and need to use default dialer.
-		defaultDialer.TLSConfig = n.TLS
-		conn, _, hs, err = defaultDialer.Dial(context.Background(), addr)
-	}
-
+	conn, _, hs, err := n.Dialer.Dial(context.Background(), addr)
 	if err != nil {
 		return err
 	}

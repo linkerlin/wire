@@ -214,6 +214,7 @@ func (nc *tcpServerClient) handleCLStatusReceive(cm mnet.Client, data []byte) er
 	}
 
 	nc.srcInfo = &info
+	nc.network.registerCluster(info.ClusterNodes)
 
 	wc, err := nc.write(cm, len(handshakeCompletedBytes))
 	if err != nil {
@@ -287,6 +288,8 @@ func (nc *tcpServerClient) handleRINFO(data []byte) error {
 
 	info.Cluster = nc.isACluster
 	nc.srcInfo = &info
+
+	nc.network.registerCluster(info.ClusterNodes)
 	return nil
 }
 
@@ -833,6 +836,10 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 		metrics.WithID(n.ID),
 	)
 
+	if n.Dialer == nil {
+		n.Dialer = &net.Dialer{Timeout: mnet.DefaultDialTimeout}
+	}
+
 	if n.TLS != nil && !n.TLS.InsecureSkipVerify {
 		n.TLS.ServerName = n.ServerName
 	}
@@ -842,7 +849,6 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 		return err
 	}
 
-	//n.ctx = ctx
 	n.raddr = stream.Addr()
 	n.pool = make(chan func(), 0)
 	n.clients = make(map[string]*tcpServerClient)
@@ -880,6 +886,19 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func (n *TCPNetwork) registerCluster(clusters []mnet.Info) {
+	for _, cluster := range clusters {
+		if err := n.AddCluster(cluster.ServerAddr); err != nil {
+			n.Metrics.Send(metrics.Entry{
+				ID:      n.ID,
+				Level:   metrics.ErrorLvl,
+				Field:   metrics.Field{"info": cluster, "nid": n.ID, "error": err},
+				Message: "Failed to add cluster addresss",
+			})
+		}
+	}
 }
 
 func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWriteCloser) {
@@ -957,19 +976,21 @@ func (n *TCPNetwork) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 	return clients, nil
 }
 
-var defaultDialer = &net.Dialer{Timeout: 2 * time.Second}
-
 // AddCluster attempts to add new connection to another mnet tcp server.
 // It will attempt to dial specified address returning an error if the
 // giving address failed or was not able to meet the handshake protocols.
 func (n *TCPNetwork) AddCluster(addr string) error {
+	if n.Addr == addr {
+		return nil
+	}
+
 	var err error
 	var conn net.Conn
 
-	if n.Dialer != nil {
+	if n.TLS == nil {
 		conn, err = n.Dialer.Dial("tcp", addr)
 	} else {
-		conn, err = defaultDialer.Dial("tcp", addr)
+		conn, err = tls.DialWithDialer(n.Dialer, "tcp", addr, n.TLS)
 	}
 
 	if err != nil {
