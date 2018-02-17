@@ -2,7 +2,10 @@ package msocks_test
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"math/rand"
+	"net"
 	"testing"
 	"time"
 
@@ -96,7 +99,7 @@ func benchThis(b *testing.B, payload []byte) {
 	b.StopTimer()
 	b.ReportAllocs()
 
-	chosenAddr := "localhost:7890"
+	chosenAddr := fmt.Sprintf("localhost:%d", freePort())
 
 	payloadLen := len(payload)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -157,7 +160,7 @@ func createBenchmarkNetwork(ctx context.Context, addr string) (*msocks.Websocket
 	return &netw, netw.Start(ctx)
 }
 
-var pub = []byte("pub  ")
+var pub = []byte("pub deck ")
 var ch = []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@$#%^&*()")
 
 func sizedPayloadString(sz int) string {
@@ -186,4 +189,22 @@ func sizedBytes(sz int) []byte {
 
 func sizedString(sz int) string {
 	return string(sizedBytes(sz))
+}
+
+func freePort() int {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		log.Fatal(err)
+		return 0
+	}
+
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+		return 0
+	}
+
+	defer l.Close()
+
+	return l.Addr().(*net.TCPAddr).Port
 }

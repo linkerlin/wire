@@ -2,7 +2,10 @@ package mudp_test
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"math/rand"
+	"net"
 	"testing"
 	"time"
 
@@ -134,15 +137,17 @@ func benchThis(b *testing.B, payload []byte) {
 	b.StopTimer()
 	b.ReportAllocs()
 
+	chosenAddr := fmt.Sprintf("localhost:%d", freePort())
+
 	payloadLen := len(payload)
 	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createBenchmarkNetwork(ctx, "localhost:5050")
+	netw, err := createBenchmarkNetwork(ctx, chosenAddr)
 	if err != nil {
 		b.Fatalf("Failed to create network: %+q", err)
 		return
 	}
 
-	client, err := mudp.Connect("localhost:5050", mudp.Metrics(events))
+	client, err := mudp.Connect(chosenAddr, mudp.Metrics(events))
 	if err != nil {
 		b.Fatalf("Failed to dial network with client: %+q", err)
 		return
@@ -214,4 +219,22 @@ func sizedBytes(sz int) []byte {
 
 func sizedString(sz int) string {
 	return string(sizedBytes(sz))
+}
+
+func freePort() int {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		log.Fatal(err)
+		return 0
+	}
+
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+		return 0
+	}
+
+	defer l.Close()
+
+	return l.Addr().(*net.TCPAddr).Port
 }

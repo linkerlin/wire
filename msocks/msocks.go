@@ -211,6 +211,17 @@ func (cn *socketClient) getInfo(cm mnet.Client) mnet.Info {
 	}
 }
 
+func (cn *socketClient) sendRescue(cm mnet.Client) error {
+	wc, err := cn.write(cm, len(rescueBytes))
+	if err != nil {
+		return err
+	}
+
+	wc.Write(rescueBytes)
+	wc.Close()
+	return cn.flush(cm)
+}
+
 func (cn *socketClient) handleCINFO(cm mnet.Client) error {
 	jsn, err := json.Marshal(cn.getInfo(cm))
 	if err != nil {
@@ -226,6 +237,105 @@ func (cn *socketClient) handleCINFO(cm mnet.Client) error {
 	wc.Write(jsn)
 	wc.Close()
 	return cn.flush(cm)
+}
+
+func (cn *socketClient) respondToINFO(cm mnet.Client, conn net.Conn, reader io.Reader) error {
+	cn.metrics.Emit(
+		metrics.WithID(cn.id),
+		metrics.With("client", cn.id),
+		metrics.With("network", cn.nid),
+		metrics.With("local-addr", cn.localAddr),
+		metrics.With("remote-addr", cn.remoteAddr),
+		metrics.With("server-addr", cn.serverAddr),
+		metrics.Message("socketClient.Handshake: Awaiting CINFO request from server"),
+	)
+
+	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
+	msg := make([]byte, mnet.SmallestMinBufferSize)
+
+	var attempts int
+	var sendRescueMsg bool
+
+	for {
+		// if we failed and timed out, then send rescue message and re-await.
+		if sendRescueMsg {
+			if err := cn.sendRescue(cm); err != nil {
+				return err
+			}
+
+			sendRescueMsg = false
+			time.Sleep(mnet.InfoTemporarySleep)
+			continue
+		}
+
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		size, err := lreader.ReadHeader()
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req header"),
+			)
+
+			// if its a timeout error then retry if we are not maxed attempts.
+			if netErr, ok := err.(net.Error); ok {
+				if netErr.Timeout() && attempts < mnet.MaxHandshakeAttempts {
+					attempts++
+					sendRescueMsg = true
+					time.Sleep(mnet.InfoTemporarySleep)
+					continue
+				}
+			}
+
+			return err
+		}
+		conn.SetReadDeadline(time.Time{})
+
+		msg = make([]byte, size)
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		_, err = lreader.Read(msg)
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req data"),
+			)
+			return err
+		}
+		conn.SetReadDeadline(time.Time{})
+
+		if !bytes.Equal(msg, cinfoBytes) {
+			cn.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.With("msg", string(msg)),
+				metrics.Message("socketClient.respondToCINFO: Invalid mnet.RCINFO prefix"),
+			)
+			return mnet.ErrFailedToRecieveInfo
+		}
+
+		break
+	}
+
+	cn.metrics.Emit(
+		metrics.WithID(cn.id),
+		metrics.With("client", cn.id),
+		metrics.With("network", cn.nid),
+		metrics.With("local-addr", cn.localAddr),
+		metrics.With("remote-addr", cn.remoteAddr),
+		metrics.With("server-addr", cn.serverAddr),
+		metrics.Message("socketClient.Handshake: Sending CINFO completed"),
+	)
+
+	return cn.handleCINFO(cm)
 }
 
 func (cn *socketClient) close(jn mnet.Client) error {
@@ -331,90 +441,4 @@ func (cn *socketClient) getConn(addr string) (net.Conn, error) {
 
 	cn.wshandshake = hs
 	return conn, err
-}
-
-func (cn *socketClient) respondToINFO(cm mnet.Client, conn net.Conn, reader io.Reader) error {
-	cn.metrics.Emit(
-		metrics.WithID(cn.id),
-		metrics.With("client", cn.id),
-		metrics.With("network", cn.nid),
-		metrics.With("local-addr", cn.localAddr),
-		metrics.With("remote-addr", cn.remoteAddr),
-		metrics.With("server-addr", cn.serverAddr),
-		metrics.Message("socketClient.Handshake: Sending CINFO response"),
-	)
-
-	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
-	msg := make([]byte, mnet.SmallestMinBufferSize)
-
-	var attempts int
-
-	for {
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
-		size, err := lreader.ReadHeader()
-		if err != nil {
-			conn.SetReadDeadline(time.Time{})
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req header"),
-			)
-
-			// if its a timeout error then retry if we are not maxed attempts.
-			if netErr, ok := err.(net.Error); ok {
-				if netErr.Timeout() && attempts < mnet.MaxHandshakeAttempts {
-					attempts++
-					time.Sleep(mnet.InfoTemporarySleep)
-					continue
-				}
-			}
-
-			return err
-		}
-		conn.SetReadDeadline(time.Time{})
-
-		msg = make([]byte, size)
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
-		_, err = lreader.Read(msg)
-		if err != nil {
-			conn.SetReadDeadline(time.Time{})
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req data"),
-			)
-			return err
-		}
-		conn.SetReadDeadline(time.Time{})
-
-		if !bytes.Equal(msg, cinfoBytes) {
-			cn.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.With("msg", string(msg)),
-				metrics.Message("socketClient.respondToCINFO: Invalid mnet.RCINFO prefix"),
-			)
-			return mnet.ErrFailedToRecieveInfo
-		}
-
-		break
-	}
-
-	cn.metrics.Emit(
-		metrics.WithID(cn.id),
-		metrics.With("client", cn.id),
-		metrics.With("network", cn.nid),
-		metrics.With("local-addr", cn.localAddr),
-		metrics.With("remote-addr", cn.remoteAddr),
-		metrics.With("server-addr", cn.serverAddr),
-		metrics.Message("socketClient.Handshake: Sending CINFO completed"),
-	)
-
-	return cn.handleCINFO(cm)
 }

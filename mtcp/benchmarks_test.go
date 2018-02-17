@@ -2,7 +2,10 @@ package mtcp_test
 
 import (
 	"crypto/tls"
+	"fmt"
+	"log"
 	"math/rand"
+	"net"
 	"testing"
 	"time"
 
@@ -98,9 +101,11 @@ func benchThis(b *testing.B, payload []byte) {
 	b.StopTimer()
 	b.ReportAllocs()
 
+	chosenAddr := fmt.Sprintf("localhost:%d", freePort())
+
 	payloadLen := len(payload)
 	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createBenchmarkNetwork(ctx, "localhost:5050", nil, defaultClientSize)
+	netw, err := createBenchmarkNetwork(ctx, chosenAddr, nil, defaultClientSize)
 	if err != nil {
 		b.Fatalf("Failed to create network: %+q", err)
 		return
@@ -108,7 +113,7 @@ func benchThis(b *testing.B, payload []byte) {
 
 	netw.MaxWriteSize = defaultClientSize
 
-	client, err := mtcp.Connect("localhost:5050", mtcp.Metrics(events), mtcp.MaxBuffer(defaultClientSize))
+	client, err := mtcp.Connect(chosenAddr, mtcp.Metrics(events), mtcp.MaxBuffer(defaultClientSize))
 	if err != nil {
 		b.Fatalf("Failed to dial network %+q", err)
 		return
@@ -198,4 +203,22 @@ func (b *writtenBuffer) Write(d []byte) (int, error) {
 	b.c += 1
 	b.totalWritten += len(d)
 	return len(d), nil
+}
+
+func freePort() int {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		log.Fatal(err)
+		return 0
+	}
+
+	l, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		log.Fatal(err)
+		return 0
+	}
+
+	defer l.Close()
+
+	return l.Addr().(*net.TCPAddr).Port
 }

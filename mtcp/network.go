@@ -29,6 +29,7 @@ var (
 	cinfoBytes              = []byte(mnet.CINFO)
 	rinfoBytes              = []byte(mnet.RINFO)
 	clStatusBytes           = []byte(mnet.CLSTATUS)
+	rescueBytes             = []byte(mnet.CRESCUE)
 	handshakeCompletedBytes = []byte(mnet.CLHANDSHAKECOMPLETED)
 )
 
@@ -269,18 +270,7 @@ func (nc *tcpServerClient) handleRINFO(data []byte) error {
 	return nil
 }
 
-func (nc *tcpServerClient) handshake(cm mnet.Client) error {
-	// Send to new client mnet.CINFO request
-	nc.metrics.Emit(
-		metrics.WithID(nc.id),
-		metrics.With("client", nc.id),
-		metrics.With("network", nc.nid),
-		metrics.With("local-addr", nc.localAddr),
-		metrics.With("remote-addr", nc.remoteAddr),
-		metrics.With("server-addr", nc.serverAddr),
-		metrics.Message("tcpServerClient.Handshake"),
-	)
-
+func (nc *tcpServerClient) sendCINFOReq(cm mnet.Client) error {
 	// Send to new client mnet.CINFO request
 	wc, err := nc.write(cm, len(cinfoBytes))
 	if err != nil {
@@ -331,6 +321,31 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 		metrics.WithID(nc.id),
 		metrics.With("client", nc.id),
 		metrics.With("network", nc.nid),
+		metrics.Message("tcpServerClient.Handshake: Sent CINFO req"),
+	)
+	return nil
+}
+
+func (nc *tcpServerClient) handshake(cm mnet.Client) error {
+	// Send to new client mnet.CINFO request
+	nc.metrics.Emit(
+		metrics.WithID(nc.id),
+		metrics.With("client", nc.id),
+		metrics.With("network", nc.nid),
+		metrics.With("local-addr", nc.localAddr),
+		metrics.With("remote-addr", nc.remoteAddr),
+		metrics.With("server-addr", nc.serverAddr),
+		metrics.Message("tcpServerClient.Handshake"),
+	)
+
+	if err := nc.sendCINFOReq(cm); err != nil {
+		return err
+	}
+
+	nc.metrics.Emit(
+		metrics.WithID(nc.id),
+		metrics.With("client", nc.id),
+		metrics.With("network", nc.nid),
 		metrics.With("local-addr", nc.localAddr),
 		metrics.With("remote-addr", nc.remoteAddr),
 		metrics.With("server-addr", nc.serverAddr),
@@ -341,25 +356,55 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 	// Wait for RCINFO response from connection.
 	for {
-		if time.Now().Sub(before) > nc.maxInfoWait {
-			nc.closeConn(cm)
-			nc.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.Message("tcpServerClient.Handshake: Timeout: awaiting mnet.RCINFo data"),
-			)
-			return mnet.ErrFailedToRecieveInfo
-		}
-
 		msg, err := nc.read(cm)
 		if err != nil {
 			if err != mnet.ErrNoDataYet {
+				nc.metrics.Emit(
+					metrics.Error(err),
+					metrics.WithID(nc.id),
+					metrics.With("client", nc.id),
+					metrics.With("network", nc.nid),
+					metrics.Message("websocketServerClient.Handshake: HandShake failed"),
+				)
 				return err
 			}
 
-			//time.Sleep(mnet.MaxInfoWaitSleep)
+			if time.Now().Sub(before) > nc.maxInfoWait {
+				nc.closeConn(cm)
+				nc.metrics.Emit(
+					metrics.Error(mnet.ErrFailedToRecieveInfo),
+					metrics.WithID(nc.id),
+					metrics.With("client", nc.id),
+					metrics.With("network", nc.nid),
+					metrics.Message("tcpServerClient.Handshake: Timeout: awaiting mnet.RCINFo data"),
+				)
+				return mnet.ErrFailedToRecieveInfo
+			}
+			continue
+		}
+
+		nc.metrics.Emit(
+			metrics.WithID(nc.id),
+			metrics.With("client", nc.id),
+			metrics.With("network", nc.nid),
+			metrics.With("message", string(msg)),
+			metrics.Message("websocketServerClient.Handshake: Message received"),
+		)
+
+		// if we get a rescue signal, then client never got our CINFO request, so resent.
+		if bytes.Equal(msg, rescueBytes) {
+			nc.metrics.Emit(
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
+			)
+			if err := nc.sendCINFOReq(cm); err != nil {
+				return err
+			}
+
+			// reset time used for tracking timeout.
+			before = time.Now()
 			continue
 		}
 
@@ -404,7 +449,15 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 	// if its a cluster send Cluster Status message.
 	if nc.isACluster {
+
 		if err := nc.handleCLStatusSend(cm); err != nil {
+			nc.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.Message("websocketServerClient.Handshake: HandShake send CLSTATUS failed"),
+			)
 			return err
 		}
 
@@ -412,25 +465,63 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 		// Wait for handshake completion signal.
 		for {
-			if time.Now().Sub(before) > nc.maxInfoWait {
-				nc.closeConn(cm)
-				nc.metrics.Emit(
-					metrics.Error(mnet.ErrFailedToCompleteHandshake),
-					metrics.WithID(nc.id),
-					metrics.With("client", nc.id),
-					metrics.With("network", nc.nid),
-					metrics.Message("tcpServerClient.Handshake: Failed to receive handshake completion before max wait"),
-				)
-				return mnet.ErrFailedToCompleteHandshake
-			}
-
 			msg, err := nc.read(cm)
 			if err != nil {
 				if err != mnet.ErrNoDataYet {
+					nc.metrics.Emit(
+						metrics.Error(err),
+						metrics.WithID(nc.id),
+						metrics.With("client", nc.id),
+						metrics.With("network", nc.nid),
+						metrics.Message("websocketServerClient.Handshake: HandShake failed"),
+					)
 					return err
 				}
 
-				//time.Sleep(mnet.MaxInfoWaitSleep)
+				if time.Now().Sub(before) > nc.maxInfoWait {
+					nc.closeConn(cm)
+					nc.metrics.Emit(
+						metrics.Error(mnet.ErrFailedToCompleteHandshake),
+						metrics.WithID(nc.id),
+						metrics.With("client", nc.id),
+						metrics.With("network", nc.nid),
+						metrics.Message("tcpServerClient.Handshake: Failed to receive handshake completion before max wait"),
+					)
+					return mnet.ErrFailedToCompleteHandshake
+				}
+				continue
+			}
+
+			nc.metrics.Emit(
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.With("message", string(msg)),
+				metrics.Message("websocketServerClient.Handshake: Message received"),
+			)
+
+			// if we get a rescue signal, then client never got our CLStatus response, so resend.
+			if bytes.Equal(msg, rescueBytes) {
+				nc.metrics.Emit(
+					metrics.WithID(nc.id),
+					metrics.With("client", nc.id),
+					metrics.With("network", nc.nid),
+					metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
+				)
+
+				if err := nc.handleCLStatusSend(cm); err != nil {
+					nc.metrics.Emit(
+						metrics.Error(err),
+						metrics.WithID(nc.id),
+						metrics.With("client", nc.id),
+						metrics.With("network", nc.nid),
+						metrics.Message("websocketServerClient.Handshake: HandShake Rescue send CLSTATUS failed"),
+					)
+					return err
+				}
+
+				// reset time used for tracking timeout.
+				before = time.Now()
 				continue
 			}
 
@@ -600,7 +691,6 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 		}
 
 		incoming = make([]byte, frame)
-
 		n, err := lreader.Read(incoming)
 		if err != nil {
 			nc.metrics.Emit(

@@ -19,11 +19,11 @@ const (
 	MaxFlushDeadline = 3 * time.Second
 
 	// MaxReadDeadline sets the maximum read deadline for reading from a net.Conn.
-	MaxReadDeadline = 3 * time.Second
+	MaxReadDeadline = 5 * time.Second
 
 	// MaxInfoWait sets the default duration to wait for arrival of connection info else
 	// closing the connection.
-	MaxInfoWait = time.Second * 5
+	MaxInfoWait = time.Second * 8
 
 	// DefaultDialTimeout sets the default maximum time in seconds allowed before
 	// a net.Dialer exits attempt to dial a network.
@@ -69,6 +69,10 @@ const (
 
 	// CINFO defines a action key for requesting connection info.
 	CINFO = "MNET:CINFO"
+
+	// CRESCUE defines a action key for sending rescue status to server if client
+	// fails to receive expected response in set limits.
+	CRESCUE = "MNET:NORCV:RESC"
 
 	// RINFO defines a action key for responding to a CINFO request.
 	RINFO = "MNET:RINFO "
