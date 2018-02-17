@@ -485,6 +485,7 @@ func (sc *websocketServerClient) handleCINFO(cm mnet.Client) error {
 }
 
 func (sc *websocketServerClient) handleRINFO(data []byte) error {
+
 	data = bytes.TrimPrefix(data, rinfoBytes)
 
 	var info mnet.Info
@@ -498,6 +499,16 @@ func (sc *websocketServerClient) handleRINFO(data []byte) error {
 }
 
 func (sc *websocketServerClient) handshake(cm mnet.Client) error {
+	sc.metrics.Emit(
+		metrics.WithID(sc.id),
+		metrics.With("client", sc.id),
+		metrics.With("network", sc.nid),
+		metrics.With("local-addr", sc.localAddr),
+		metrics.With("remote-addr", sc.remoteAddr),
+		metrics.With("server-addr", sc.serverAddr),
+		metrics.Message("websocketServerClient.Handshake"),
+	)
+
 	// Send to new client mnet.CINFO request
 	wc, err := sc.write(cm, len(cinfoBytes))
 	if err != nil {
@@ -509,6 +520,16 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 	sc.flush(cm)
 
 	before := time.Now()
+
+	sc.metrics.Emit(
+		metrics.WithID(sc.id),
+		metrics.With("client", sc.id),
+		metrics.With("network", sc.nid),
+		metrics.With("local-addr", sc.localAddr),
+		metrics.With("remote-addr", sc.remoteAddr),
+		metrics.With("server-addr", sc.serverAddr),
+		metrics.Message("websocketServerClient.Handshake: Awating CINFO req"),
+	)
 
 	// Wait for RCINFO response from connection.
 	for {
@@ -562,6 +583,16 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 		break
 	}
 
+	sc.metrics.Emit(
+		metrics.WithID(sc.id),
+		metrics.With("client", sc.id),
+		metrics.With("network", sc.nid),
+		metrics.With("local-addr", sc.localAddr),
+		metrics.With("remote-addr", sc.remoteAddr),
+		metrics.With("server-addr", sc.serverAddr),
+		metrics.Message("websocketServerClient.Handshake: Send Cluster Status Message"),
+	)
+
 	// if its a cluster send Cluster Status message.
 	if sc.isACluster {
 		if err := sc.handleCLStatusSend(cm); err != nil {
@@ -608,6 +639,16 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 			break
 		}
 	}
+
+	sc.metrics.Emit(
+		metrics.WithID(sc.id),
+		metrics.With("client", sc.id),
+		metrics.With("network", sc.nid),
+		metrics.With("local-addr", sc.localAddr),
+		metrics.With("remote-addr", sc.remoteAddr),
+		metrics.With("server-addr", sc.serverAddr),
+		metrics.Message("websocketServerClient.Handshake: Completed"),
+	)
 
 	return nil
 }

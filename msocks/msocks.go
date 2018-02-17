@@ -123,6 +123,11 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	network.id = c.ID
 	network.addr = addr
 	network.hostname = host
+
+	if network.nid == "" {
+		network.nid = "no-network-id"
+	}
+
 	if network.network == "" {
 		network.network = "udp"
 	}
@@ -266,6 +271,7 @@ func (cn *socketClient) reconnect(jn mnet.Client, addr string) error {
 
 	cn.localAddr = conn.LocalAddr()
 	cn.remoteAddr = conn.RemoteAddr()
+	cn.serverAddr = conn.RemoteAddr()
 
 	reader := wsutil.NewReader(conn, wsClientState)
 	writer := wsutil.NewWriter(conn, wsClientState, ws.OpBinary)
@@ -323,6 +329,16 @@ func (cn *socketClient) getConn(addr string) (net.Conn, error) {
 func (cn *socketClient) respondToINFO(cm mnet.Client) error {
 	before := time.Now()
 
+	cn.metrics.Emit(
+		metrics.WithID(cn.id),
+		metrics.With("client", cn.id),
+		metrics.With("network", cn.nid),
+		metrics.With("local-addr", cn.localAddr),
+		metrics.With("remote-addr", cn.remoteAddr),
+		metrics.With("server-addr", cn.serverAddr),
+		metrics.Message("socketClient.Handshake: Sending CINFO response"),
+	)
+
 	for {
 		msg, err := cn.parser.Next()
 		if err != nil {
@@ -334,13 +350,40 @@ func (cn *socketClient) respondToINFO(cm mnet.Client) error {
 		}
 
 		if time.Now().Sub(before) > cn.maxInfoWait {
+			cn.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.Message("Timeout: awaiting mnet.RCINFo req"),
+			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		if !bytes.Equal(msg, cinfoBytes) {
+			cn.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.With("msg", string(msg)),
+				metrics.Message("Invalid mnet.RCINFO prefix"),
+			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
-		return cn.handleCINFO(cm)
+		break
 	}
+
+	cn.metrics.Emit(
+		metrics.WithID(cn.id),
+		metrics.With("client", cn.id),
+		metrics.With("network", cn.nid),
+		metrics.With("local-addr", cn.localAddr),
+		metrics.With("remote-addr", cn.remoteAddr),
+		metrics.With("server-addr", cn.serverAddr),
+		metrics.Message("socketClient.Handshake: Sending CINFO completed"),
+	)
+
+	return cn.handleCINFO(cm)
 }
