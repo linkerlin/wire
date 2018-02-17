@@ -177,8 +177,7 @@ type clientNetwork struct {
 	maxWrite               int
 	clientMaxWriteDeadline time.Duration
 
-	parser  *internal.TaggedMessages
-	streams *internal.StreamedMessages
+	parser *internal.TaggedMessages
 
 	bu         sync.Mutex
 	buffWriter *bufio.Writer

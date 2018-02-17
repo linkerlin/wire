@@ -186,9 +186,19 @@ func (nc *tcpServerClient) getInfo(cm mnet.Client) mnet.Info {
 			ID:         nc.id,
 			ServerNode: true,
 			Cluster:    nc.isACluster,
+			Meta:       nc.network.Meta,
 			MaxBuffer:  int64(nc.maxWrite),
 			MinBuffer:  mnet.MinBufferSize,
 			ServerAddr: nc.serverAddr.String(),
+		}
+	}
+
+	if others, err := nc.network.getOtherClients(cm); err != nil {
+		for _, other := range others {
+			if !other.IsCluster() {
+				continue
+			}
+			base.ClusterNodes = append(base.ClusterNodes, other.Info())
 		}
 	}
 
@@ -220,9 +230,19 @@ func (nc *tcpServerClient) handleCLStatusSend(cm mnet.Client) error {
 	info.Cluster = true
 	info.ServerNode = true
 	info.ID = nc.network.ID
+	info.Meta = nc.network.Meta
 	info.MaxBuffer = int64(nc.maxWrite)
 	info.MinBuffer = mnet.MinBufferSize
 	info.ServerAddr = nc.network.raddr.String()
+
+	if others, err := nc.network.getOtherClients(cm); err != nil {
+		for _, other := range others {
+			if !other.IsCluster() {
+				continue
+			}
+			info.ClusterNodes = append(info.ClusterNodes, other.Info())
+		}
+	}
 
 	jsn, err := json.Marshal(info)
 	if err != nil {
@@ -740,14 +760,23 @@ type TCPNetwork struct {
 	Handler    mnet.ConnHandler
 	Metrics    metrics.Metrics
 
-	// Dialer to be used to create net.Conn to connect to cluster address
-	// in TCPNetwork.AddCluster. Set to use a custom dialer.
-	Dialer *net.Dialer
-
 	totalClients int64
 	totalClosed  int64
 	totalActive  int64
 	totalOpened  int64
+
+	// Hook provides a means to get hook into the lifecycle-processes of
+	// the network and client connection and disconnection.
+	Hook mnet.Hook
+
+	// Dialer to be used to create net.Conn to connect to cluster address
+	// in TCPNetwork.AddCluster. Set to use a custom dialer.
+	Dialer *net.Dialer
+
+	// Meta contains user defined gacts for this server which will be send along
+	// the transfer. Always ensure not to keep large objects or info in here. It
+	// is expected to be small.
+	Meta mnet.Meta
 
 	// MaxConnection defines the total allowed connections for
 	// giving network.
@@ -846,6 +875,10 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	go n.runStream(stream)
 	go n.handleClose(ctx, stream)
 
+	if n.Hook != nil {
+		n.Hook.NetworkStarted()
+	}
+
 	return nil
 }
 
@@ -871,6 +904,10 @@ func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWrite
 			metrics.With("serverName", n.ServerName),
 			metrics.WithID(n.ID),
 		)
+	}
+
+	if n.Hook != nil {
+		n.Hook.NetworkClosed()
 	}
 }
 
@@ -1036,7 +1073,8 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	atomic.AddInt64(&n.totalClients, 1)
 	go func() {
 		if err := n.Handler(client); err != nil {
-			client.Close()
+			nc.closeConnection(client)
+
 			n.Metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
@@ -1049,6 +1087,10 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 		n.cu.Lock()
 		delete(n.clients, id)
 		n.cu.Unlock()
+
+		if n.Hook != nil {
+			n.Hook.NodeDisconnected(client)
+		}
 
 		if policy != nil {
 			go func() {
@@ -1064,6 +1106,10 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 			}()
 		}
 	}()
+
+	if n.Hook != nil {
+		n.Hook.NodeAdded(client)
+	}
 
 	return nil
 }

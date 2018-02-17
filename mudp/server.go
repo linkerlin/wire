@@ -252,8 +252,12 @@ type UDPNetwork struct {
 	ServerName         string
 	Multicast          bool
 	MulticastInterface *net.Interface
-	Handler            mnet.ConnHandler
 	Metrics            metrics.Metrics
+	Handler            mnet.ConnHandler
+
+	// Hook provides a means to get hook into the lifecycle-processes of
+	// the network and client connection and disconnection.
+	Hook mnet.Hook
 
 	// ReadBuffer sets the read buffer to be used by the udp listener
 	// ensure this is set according to what is set on os else the
@@ -371,6 +375,10 @@ func (n *UDPNetwork) Start(ctx context.Context) error {
 	go n.handleConnections(ctx, serverConn)
 	go n.handleCloseRequest(ctx, serverConn)
 
+	if n.Hook != nil {
+		n.Hook.NetworkStarted()
+	}
+
 	return nil
 }
 
@@ -378,6 +386,10 @@ func (n *UDPNetwork) handleCloseRequest(ctx context.Context, con *net.UDPConn) {
 	defer n.rung.Done()
 	<-ctx.Done()
 	con.Close()
+
+	if n.Hook != nil {
+		n.Hook.NetworkClosed()
+	}
 }
 
 func (n *UDPNetwork) getAllClient(skipAddr net.Addr) []mnet.Client {
@@ -465,10 +477,18 @@ func (n *UDPNetwork) addClient(addr net.Addr, conn *net.UDPConn) *targetConn {
 				)
 			}
 
+			if n.Hook != nil {
+				n.Hook.NodeDisconnected(mclient)
+			}
+
 			n.cu.Lock()
 			defer n.cu.Unlock()
 			delete(n.clients, addr.String())
 		}(mclient, addr)
+
+		if n.Hook != nil {
+			n.Hook.NodeAdded(mclient)
+		}
 
 	}
 

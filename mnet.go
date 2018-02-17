@@ -111,6 +111,21 @@ func ExponentialDelay(expand time.Duration) DelayJudge {
 }
 
 //*************************************************************************
+// Hook Type
+//*************************************************************************
+
+// Hook defines an interface which exposes methods to receive notifications
+// of the connection/disconnect of clients and network.
+type Hook interface {
+	NetworkClosed()
+	NetworkStarted()
+	NodeAdded(Client)
+	NodeDisconnected(Client)
+	ClusterAdded(Client)
+	ClusterDisconnected(Client)
+}
+
+//*************************************************************************
 // Method Function types
 //*************************************************************************
 
@@ -187,14 +202,21 @@ type ClientStatistic struct {
 	Reconnects      int64
 }
 
-// Info emodies a struct to contain specific info related to a giving connection.
+// Meta are small facts and details contained in a map sent along with
+// a info object.
+type Meta map[string]interface{}
+
+// Info emodies a struct to contain specific info related to a giving network,
+// it also contains data relating to known network servers by a giving network.
 type Info struct {
-	Cluster    bool
-	ServerNode bool
-	ID         string
-	ServerAddr string
-	MaxBuffer  int64
-	MinBuffer  int64
+	Cluster      bool
+	ServerNode   bool
+	ID           string
+	ServerAddr   string
+	MaxBuffer    int64
+	MinBuffer    int64
+	ClusterNodes []Info
+	Meta         Meta
 }
 
 //*************************************************************************
@@ -450,23 +472,4 @@ func (c Client) Others() ([]Client, error) {
 	}
 
 	return c.SiblingsFunc(c)
-}
-
-//*************************************************************************
-// Stream Type and Interface
-//*************************************************************************
-
-// Part embodies  offset information for a giving data stream.
-type Part struct {
-	Begin int64
-	End   int64
-}
-
-// Meta embodies meta data used to contain data related to
-// a stream.
-type Meta struct {
-	Chunk int64
-	Total int64
-	Id    string
-	Parts []Part
 }

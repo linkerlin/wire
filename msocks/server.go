@@ -55,6 +55,7 @@ type websocketServerClient struct {
 	maxDeadline    time.Duration
 	maxInfoWait    time.Duration
 	wshandshake    ws.Handshake
+	network        *WebsocketNetwork
 	metrics        metrics.Metrics
 	parser         *internal.TaggedMessages
 	closedCounter  int64
@@ -410,19 +411,31 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 }
 
 func (sc *websocketServerClient) getInfo(cm mnet.Client) mnet.Info {
+	var base mnet.Info
 	if sc.isCluster(cm) && sc.srcInfo != nil {
-		return *sc.srcInfo
+		base = *sc.srcInfo
+	} else {
+		base = mnet.Info{
+			ID:         sc.id,
+			ServerNode: true,
+			Meta:       sc.network.Meta,
+			Cluster:    sc.isACluster,
+			MaxBuffer:  int64(sc.maxWrite),
+			MinBuffer:  mnet.MinBufferSize,
+			ServerAddr: sc.serverAddr.String(),
+		}
 	}
 
-	return mnet.Info{
-		ID:         sc.id,
-		ServerNode: true,
-		Cluster:    sc.isACluster,
-		ServerAddr: sc.serverAddr.String(),
-		MaxBuffer:  int64(sc.maxWrite),
-		MinBuffer:  mnet.MinBufferSize,
+	if others, err := sc.network.getAllClient(cm); err != nil {
+		for _, other := range others {
+			if !other.IsCluster() {
+				continue
+			}
+			base.ClusterNodes = append(base.ClusterNodes, other.Info())
+		}
 	}
 
+	return base
 }
 
 func (sc *websocketServerClient) handleCLStatusReceive(cm mnet.Client, data []byte) error {
@@ -450,9 +463,19 @@ func (sc *websocketServerClient) handleCLStatusSend(cm mnet.Client) error {
 	info.ID = sc.nid
 	info.Cluster = true
 	info.ServerNode = true
+	info.Meta = sc.network.Meta
 	info.MinBuffer = mnet.MinBufferSize
 	info.MaxBuffer = int64(sc.maxWrite)
 	info.ServerAddr = sc.serverAddr.String()
+
+	if others, err := sc.network.getAllClient(cm); err != nil {
+		for _, other := range others {
+			if !other.IsCluster() {
+				continue
+			}
+			info.ClusterNodes = append(info.ClusterNodes, other.Info())
+		}
+	}
 
 	jsn, err := json.Marshal(info)
 	if err != nil {
@@ -806,6 +829,15 @@ type WebsocketNetwork struct {
 	totalOpened  int64
 	started      int64
 
+	// Hook provides a means to get hook into the lifecycle-processes of
+	// the network and client connection and disconnection.
+	Hook mnet.Hook
+
+	// Meta contains user defined gacts for this server which will be send along
+	// the transfer. Always ensure not to keep large objects or info in here. It
+	// is expected to be small.
+	Meta mnet.Meta
+
 	// Dialer to be used to create net.Conn to connect to cluster address
 	// in TCPNetwork.AddCluster. Set to use a custom dialer.
 	Dialer *ws.Dialer
@@ -925,7 +957,14 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		stream.Close()
+		if n.Hook != nil {
+			n.Hook.NetworkClosed()
+		}
 	}()
+
+	if n.Hook != nil {
+		n.Hook.NetworkStarted()
+	}
 
 	return nil
 }
@@ -1049,6 +1088,7 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	client := new(websocketServerClient)
 	client.nid = n.ID
 	client.conn = conn
+	client.network = n
 	client.wshandshake = hs
 	client.metrics = n.Metrics
 	client.wsReader = wsReader
@@ -1122,6 +1162,10 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 		delete(n.clients, client.id)
 		n.cu.Unlock()
 
+		if n.Hook != nil {
+			n.Hook.NodeDisconnected(mclient)
+		}
+
 		if policy != nil {
 			go func() {
 				if err := n.isAlive(); err != nil {
@@ -1149,6 +1193,10 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 			}()
 		}
 	}(mclient, client.remoteAddr)
+
+	if n.Hook != nil {
+		n.Hook.NodeAdded(mclient)
+	}
 
 	return nil
 }

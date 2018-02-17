@@ -11,41 +11,10 @@ import (
 	"github.com/influx6/mnet"
 )
 
-//*************************************************************************
-// StreamReader Implementation
-//*************************************************************************
-
-//// StreamReader implements mnet.StreamReader which wraps an existing
-//// mnet.Client instance and handles the necessary logic to piece together
-//// chunked streamed contents that were transferred over the wire.
-//type StreamReader struct {
-//	mnet.Client
-//	collator *StreamedMessages
-//}
-//
-//// NewStreamReader returns a new instance of a StreamReader.
-//func NewStreamReader(c mnet.Client, maxStaleness time.Duration, keepFailed bool) *StreamReader {
-//	return &StreamReader{
-//		Client:   c,
-//		collator: NewStreamedMessages(maxStaleness, keepFailed),
-//	}
-//}
-//
-//// Failed returns all failed and uncompleted/staled streams
-//// which may allow you request missing areas as desired.
-//func (sr *StreamReader) Failed() map[string]*Streamed {
-//	return sr.collator.FailedStreams()
-//}
-//
-//// Read attempts to read data from it's composed mnet.Client, if non
-//// is received, it then queries it's internal stream collector/collator
-//// which if it has any completed streams, will return a completed
-//// stream data and meta information. If the client returns new data which
-//// it itself is not a stream part/chunk, then that is returned as is with no
-//// associated meta.
-//func (sr *StreamReader) Read() ([]byte, *mnet.Meta, error) {
-//
-//}
+var (
+	colon = []byte(":")
+	ctrl  = []byte("\r\n")
+)
 
 //*************************************************************************
 // StreamWriter Implementation
