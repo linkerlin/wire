@@ -96,9 +96,11 @@ func benchThis(b *testing.B, payload []byte) {
 	b.StopTimer()
 	b.ReportAllocs()
 
+	chosenAddr := "localhost:7890"
+
 	payloadLen := len(payload)
 	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createBenchmarkNetwork(ctx, "localhost:5050")
+	netw, err := createBenchmarkNetwork(ctx, chosenAddr)
 	if err != nil {
 		b.Fatalf("Failed to create network: %+q", err)
 		return
@@ -106,7 +108,7 @@ func benchThis(b *testing.B, payload []byte) {
 
 	netw.MaxWriteSize = defaultClientSize
 
-	client, err := msocks.Connect("localhost:5050",
+	client, err := msocks.Connect(chosenAddr,
 		msocks.Metrics(events),
 		msocks.MaxBuffer(defaultClientSize),
 	)

@@ -539,6 +539,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 				return err
 			}
 
+			//time.Sleep(mnet.InfoTemporarySleep)
 			continue
 		}
 
@@ -609,6 +610,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 					return err
 				}
 
+				//time.Sleep(mnet.InfoTemporarySleep)
 				continue
 			}
 

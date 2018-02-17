@@ -288,7 +288,8 @@ func (cn *socketClient) reconnect(jn mnet.Client, addr string) error {
 	cn.waiter.Add(1)
 	go cn.readLoop(conn, reader)
 
-	return cn.respondToINFO(jn)
+	//return cn.respondToINFO(jn)
+	return nil
 }
 
 // getConn returns net.Conn for giving addr.
@@ -346,6 +347,7 @@ func (cn *socketClient) respondToINFO(cm mnet.Client) error {
 				return err
 			}
 
+			time.Sleep(mnet.InfoTemporarySleep)
 			continue
 		}
 

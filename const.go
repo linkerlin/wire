@@ -7,6 +7,10 @@ const (
 	// take when facing a Temporary net error.
 	MinTemporarySleep = 10 * time.Millisecond
 
+	// InfoTemporarySleep sets the minimum, initial sleep a network should
+	// take when facing a Temporary net error.
+	InfoTemporarySleep = 300 * time.Millisecond
+
 	// MaxTemporarySleep sets the maximum, allowed sleep a network should
 	// take when facing a Temporary net error.
 	MaxTemporarySleep = 1 * time.Second
