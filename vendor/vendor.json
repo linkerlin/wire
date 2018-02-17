@@ -69,6 +69,12 @@
 			"revisionTime": "2018-02-16T08:47:29Z"
 		},
 		{
+			"checksumSHA1": "MCJhRQdyZgx93uwQDtLmAB+EuOY=",
+			"path": "github.com/influx6/faux/pools/pbytes",
+			"revision": "e591b70bd5a6a51b4ecfc1695a73e65d77354b15",
+			"revisionTime": "2018-02-16T08:47:29Z"
+		},
+		{
 			"checksumSHA1": "3wLtq6AV0Kh6iz2J9RmsWIqdBiM=",
 			"path": "github.com/influx6/faux/pools/seeker",
 			"revision": "e591b70bd5a6a51b4ecfc1695a73e65d77354b15",
