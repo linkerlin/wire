@@ -71,8 +71,8 @@ func (smp *TaggedMessages) Parse(d []byte) error {
 // Next returns the next message saved on the parsers linked list.
 func (smp *TaggedMessages) Next() ([]byte, error) {
 	smp.mu.RLock()
+	defer smp.mu.RUnlock()
 	if smp.tail == nil && smp.head == nil {
-		smp.mu.RUnlock()
 		return nil, mnet.ErrNoDataYet
 	}
 
@@ -88,7 +88,6 @@ func (smp *TaggedMessages) Next() ([]byte, error) {
 
 	data := head.Data
 	head.Data = nil
-	smp.mu.RUnlock()
 
 	messagePool.Put(head)
 
