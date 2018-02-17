@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -285,31 +286,36 @@ func (cn *socketClient) reconnect(jn mnet.Client, addr string) error {
 	cn.wsWriter = writer
 	cn.bu.Unlock()
 
+	if err := cn.respondToINFO(jn, conn, reader); err != nil {
+		return err
+	}
+
 	cn.waiter.Add(1)
 	go cn.readLoop(conn, reader)
 
-	//return cn.respondToINFO(jn)
 	return nil
 }
 
 // getConn returns net.Conn for giving addr.
 func (cn *socketClient) getConn(addr string) (net.Conn, error) {
-	lastSleep := mnet.MinTemporarySleep
-
 	var err error
 	var conn net.Conn
 	var hs ws.Handshake
+
+	lastSleep := mnet.MinTemporarySleep
+
 	for {
 		conn, _, hs, err = cn.dialer.Dial(context.Background(), addr)
 		if err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
-				metrics.With("type", "tcp"),
 				metrics.With("addr", addr),
 				metrics.With("network", cn.nid),
+				metrics.With("type", "tcp"),
 				metrics.Message("Connection: failed to connect"),
 			)
+
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				if lastSleep >= mnet.MaxTemporarySleep {
 					return nil, err
@@ -327,9 +333,7 @@ func (cn *socketClient) getConn(addr string) (net.Conn, error) {
 	return conn, err
 }
 
-func (cn *socketClient) respondToINFO(cm mnet.Client) error {
-	before := time.Now()
-
+func (cn *socketClient) respondToINFO(cm mnet.Client, conn net.Conn, reader io.Reader) error {
 	cn.metrics.Emit(
 		metrics.WithID(cn.id),
 		metrics.With("client", cn.id),
@@ -340,27 +344,52 @@ func (cn *socketClient) respondToINFO(cm mnet.Client) error {
 		metrics.Message("socketClient.Handshake: Sending CINFO response"),
 	)
 
+	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
+	msg := make([]byte, mnet.SmallestMinBufferSize)
+
+	var attempts int
+
 	for {
-		msg, err := cn.parser.Next()
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		size, err := lreader.ReadHeader()
 		if err != nil {
-			if err != mnet.ErrNoDataYet {
-				return err
-			}
-
-			time.Sleep(mnet.InfoTemporarySleep)
-			continue
-		}
-
-		if time.Now().Sub(before) > cn.maxInfoWait {
+			conn.SetReadDeadline(time.Time{})
 			cn.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.Error(err),
 				metrics.WithID(cn.id),
 				metrics.With("client", cn.id),
 				metrics.With("network", cn.nid),
-				metrics.Message("Timeout: awaiting mnet.RCINFo req"),
+				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req header"),
 			)
-			return mnet.ErrFailedToRecieveInfo
+
+			// if its a timeout error then retry if we are not maxed attempts.
+			if netErr, ok := err.(net.Error); ok {
+				if netErr.Timeout() && attempts < mnet.MaxHandshakeAttempts {
+					attempts++
+					time.Sleep(mnet.InfoTemporarySleep)
+					continue
+				}
+			}
+
+			return err
 		}
+		conn.SetReadDeadline(time.Time{})
+
+		msg = make([]byte, size)
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		_, err = lreader.Read(msg)
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req data"),
+			)
+			return err
+		}
+		conn.SetReadDeadline(time.Time{})
 
 		if !bytes.Equal(msg, cinfoBytes) {
 			cn.metrics.Emit(
@@ -369,7 +398,7 @@ func (cn *socketClient) respondToINFO(cm mnet.Client) error {
 				metrics.With("client", cn.id),
 				metrics.With("network", cn.nid),
 				metrics.With("msg", string(msg)),
-				metrics.Message("Invalid mnet.RCINFO prefix"),
+				metrics.Message("socketClient.respondToCINFO: Invalid mnet.RCINFO prefix"),
 			)
 			return mnet.ErrFailedToRecieveInfo
 		}

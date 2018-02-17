@@ -144,7 +144,7 @@ func benchThis(b *testing.B, payload []byte) {
 
 	client, err := mudp.Connect("localhost:5050", mudp.Metrics(events))
 	if err != nil {
-		b.Fatalf("Failed to dial network %+q", err)
+		b.Fatalf("Failed to dial network with client: %+q", err)
 		return
 	}
 

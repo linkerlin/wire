@@ -271,19 +271,88 @@ func (nc *tcpServerClient) handleRINFO(data []byte) error {
 
 func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 	// Send to new client mnet.CINFO request
+	nc.metrics.Emit(
+		metrics.WithID(nc.id),
+		metrics.With("client", nc.id),
+		metrics.With("network", nc.nid),
+		metrics.With("local-addr", nc.localAddr),
+		metrics.With("remote-addr", nc.remoteAddr),
+		metrics.With("server-addr", nc.serverAddr),
+		metrics.Message("tcpServerClient.Handshake"),
+	)
+
+	// Send to new client mnet.CINFO request
 	wc, err := nc.write(cm, len(cinfoBytes))
 	if err != nil {
+		nc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(nc.id),
+			metrics.With("client", nc.id),
+			metrics.With("network", nc.nid),
+			metrics.Message("tcpServerClient.Handshake: failed to send CINFO req"),
+		)
 		return err
 	}
 
-	wc.Write(cinfoBytes)
-	wc.Close()
-	nc.flush(cm)
+	if _, err := wc.Write(cinfoBytes); err != nil {
+		nc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(nc.id),
+			metrics.With("client", nc.id),
+			metrics.With("network", nc.nid),
+			metrics.Message("tcpServerClient.Handshake: failed to send CINFO req"),
+		)
+		return err
+	}
+
+	if err := wc.Close(); err != nil {
+		nc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(nc.id),
+			metrics.With("client", nc.id),
+			metrics.With("network", nc.nid),
+			metrics.Message("tcpServerClient.Handshake: failed to send CINFO req"),
+		)
+		return err
+	}
+
+	if err := nc.flush(cm); err != nil {
+		nc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(nc.id),
+			metrics.With("client", nc.id),
+			metrics.With("network", nc.nid),
+			metrics.Message("tcpServerClient.Handshake: failed to flush CINFO req"),
+		)
+		return err
+	}
+
+	nc.metrics.Emit(
+		metrics.WithID(nc.id),
+		metrics.With("client", nc.id),
+		metrics.With("network", nc.nid),
+		metrics.With("local-addr", nc.localAddr),
+		metrics.With("remote-addr", nc.remoteAddr),
+		metrics.With("server-addr", nc.serverAddr),
+		metrics.Message("tcpServerClient.Handshake: Awating CINFO response"),
+	)
 
 	before := time.Now()
 
 	// Wait for RCINFO response from connection.
 	for {
+		if time.Now().Sub(before) > nc.maxInfoWait {
+			nc.closeConn(cm)
+			nc.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(nc.id),
+				metrics.With("client", nc.id),
+				metrics.With("network", nc.nid),
+				metrics.Message("tcpServerClient.Handshake: Timeout: awaiting mnet.RCINFo data"),
+			)
+			return mnet.ErrFailedToRecieveInfo
+		}
+
 		msg, err := nc.read(cm)
 		if err != nil {
 			if err != mnet.ErrNoDataYet {
@@ -292,18 +361,6 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 			//time.Sleep(mnet.MaxInfoWaitSleep)
 			continue
-		}
-
-		if time.Now().Sub(before) > nc.maxInfoWait {
-			nc.closeConn(cm)
-			nc.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.Message("Timeout: awaiting mnet.RCINFo data"),
-			)
-			return mnet.ErrFailedToRecieveInfo
 		}
 
 		// First message should be a mnet.RCINFO response.
@@ -315,7 +372,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				metrics.With("client", nc.id),
 				metrics.With("network", nc.nid),
 				metrics.With("data", string(msg)),
-				metrics.Message("Invalid mnet.RCINFO prefix"),
+				metrics.Message("tcpServerClient.Handshake: Invalid mnet.RCINFO prefix"),
 			)
 			return mnet.ErrFailedToRecieveInfo
 		}
@@ -327,13 +384,23 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				metrics.With("client", nc.id),
 				metrics.With("network", nc.nid),
 				metrics.With("data", string(msg)),
-				metrics.Message("Invalid mnet.RCINFO data"),
+				metrics.Message("tcpServerClient.Handshake: Invalid mnet.RCINFO data"),
 			)
 			return err
 		}
 
 		break
 	}
+
+	nc.metrics.Emit(
+		metrics.WithID(nc.id),
+		metrics.With("client", nc.id),
+		metrics.With("network", nc.nid),
+		metrics.With("local-addr", nc.localAddr),
+		metrics.With("remote-addr", nc.remoteAddr),
+		metrics.With("server-addr", nc.serverAddr),
+		metrics.Message("tcpServerClient.Handshake: Send Cluster Status Message"),
+	)
 
 	// if its a cluster send Cluster Status message.
 	if nc.isACluster {
@@ -345,6 +412,18 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 		// Wait for handshake completion signal.
 		for {
+			if time.Now().Sub(before) > nc.maxInfoWait {
+				nc.closeConn(cm)
+				nc.metrics.Emit(
+					metrics.Error(mnet.ErrFailedToCompleteHandshake),
+					metrics.WithID(nc.id),
+					metrics.With("client", nc.id),
+					metrics.With("network", nc.nid),
+					metrics.Message("tcpServerClient.Handshake: Failed to receive handshake completion before max wait"),
+				)
+				return mnet.ErrFailedToCompleteHandshake
+			}
+
 			msg, err := nc.read(cm)
 			if err != nil {
 				if err != mnet.ErrNoDataYet {
@@ -355,18 +434,6 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				continue
 			}
 
-			if time.Now().Sub(before) > nc.maxInfoWait {
-				nc.closeConn(cm)
-				nc.metrics.Emit(
-					metrics.Error(mnet.ErrFailedToCompleteHandshake),
-					metrics.WithID(nc.id),
-					metrics.With("client", nc.id),
-					metrics.With("network", nc.nid),
-					metrics.Message("Failed to receive handshake completion before max wait"),
-				)
-				return mnet.ErrFailedToCompleteHandshake
-			}
-
 			if !bytes.Equal(msg, handshakeCompletedBytes) {
 				nc.metrics.Emit(
 					metrics.Error(mnet.ErrFailedToCompleteHandshake),
@@ -374,7 +441,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 					metrics.With("client", nc.id),
 					metrics.With("network", nc.nid),
 					metrics.With("data", string(msg)),
-					metrics.Message("Invalid handshake completion data"),
+					metrics.Message("tcpServerClient.Handshake: Invalid handshake completion data"),
 				)
 				return mnet.ErrFailedToCompleteHandshake
 			}
@@ -382,6 +449,16 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 			break
 		}
 	}
+
+	nc.metrics.Emit(
+		metrics.WithID(nc.id),
+		metrics.With("client", nc.id),
+		metrics.With("network", nc.nid),
+		metrics.With("local-addr", nc.localAddr),
+		metrics.With("remote-addr", nc.remoteAddr),
+		metrics.With("server-addr", nc.serverAddr),
+		metrics.Message("tcpServerClient.Handshake: Completed"),
+	)
 
 	return nil
 }

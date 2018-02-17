@@ -531,35 +531,99 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	cn.remoteAddr = conn.RemoteAddr()
 	cn.cu.Unlock()
 
+	connReader := bufio.NewReaderSize(conn, mnet.MaxBufferSize)
+	if err := cn.respondToINFO(cm, conn, connReader); err != nil {
+		return err
+	}
+
 	cn.worker.Add(1)
 	go cn.readLoop(cm, conn)
 
-	return cn.respondToINFO(cm)
+	return nil
 }
 
-func (cn *clientNetwork) respondToINFO(cm mnet.Client) error {
-	before := time.Now()
+func (cn *clientNetwork) respondToINFO(cm mnet.Client, conn net.Conn, reader io.Reader) error {
+	cn.metrics.Emit(
+		metrics.WithID(cn.id),
+		metrics.With("client", cn.id),
+		metrics.With("network", cn.nid),
+		metrics.With("local-addr", cn.localAddr),
+		metrics.With("remote-addr", cn.remoteAddr),
+		metrics.Message("clientNetwork.Handshake: Sending CINFO response"),
+	)
+
+	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
+	msg := make([]byte, mnet.SmallestMinBufferSize)
+
+	var attempts int
 
 	for {
-		msg, err := cn.parser.Next()
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		size, err := lreader.ReadHeader()
 		if err != nil {
-			if err != mnet.ErrNoDataYet {
-				return err
+			conn.SetReadDeadline(time.Time{})
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.Message("clientNetwork.respondToINFO: failed to receive mnet.RCINFo req header"),
+			)
+
+			// if its a timeout error then retry if we are not maxed attempts.
+			if netErr, ok := err.(net.Error); ok {
+				if netErr.Timeout() && attempts < mnet.MaxHandshakeAttempts {
+					attempts++
+					time.Sleep(mnet.InfoTemporarySleep)
+					continue
+				}
 			}
 
-			continue
+			return err
 		}
+		conn.SetReadDeadline(time.Time{})
 
-		if time.Now().Sub(before) > mnet.MaxInfoWait {
-			return mnet.ErrFailedToRecieveInfo
+		msg = make([]byte, size)
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		_, err = lreader.Read(msg)
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.Message("clientNetwork.respondToINFO: failed to receive mnet.RCINFo req data"),
+			)
+			return err
 		}
+		conn.SetReadDeadline(time.Time{})
 
 		if !bytes.Equal(msg, cinfoBytes) {
+			cn.metrics.Emit(
+				metrics.Error(mnet.ErrFailedToRecieveInfo),
+				metrics.WithID(cn.id),
+				metrics.With("client", cn.id),
+				metrics.With("network", cn.nid),
+				metrics.With("msg", string(msg)),
+				metrics.Message("clientNetwork.respondToCINFO: Invalid mnet.RCINFO prefix"),
+			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
-		return cn.handleCINFO(cm)
+		break
 	}
+
+	cn.metrics.Emit(
+		metrics.WithID(cn.id),
+		metrics.With("client", cn.id),
+		metrics.With("network", cn.nid),
+		metrics.With("local-addr", cn.localAddr),
+		metrics.With("remote-addr", cn.remoteAddr),
+		metrics.Message("clientNetwork.respondToCINFO: Sending CINFO completed"),
+	)
+
+	return cn.handleCINFO(cm)
 }
 
 // getConn returns net.Conn for giving addr.
@@ -568,17 +632,19 @@ func (cn *clientNetwork) getConn(_ mnet.Client, addr string) (net.Conn, error) {
 
 	var err error
 	var conn net.Conn
+
 	for {
 		conn, err = cn.dialer.Dial("tcp", addr)
 		if err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
-				metrics.With("type", "tcp"),
 				metrics.With("addr", addr),
 				metrics.With("network", cn.nid),
+				metrics.With("type", "tcp"),
 				metrics.Message("Connection: failed to connect"),
 			)
+
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				if lastSleep >= mnet.MaxTemporarySleep {
 					return nil, err

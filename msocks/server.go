@@ -30,6 +30,7 @@ var (
 	rinfoBytes              = []byte(mnet.RINFO)
 	clStatusBytes           = []byte(mnet.CLSTATUS)
 	handshakeCompletedBytes = []byte(mnet.CLHANDSHAKECOMPLETED)
+	cinfoInBytes            = []byte{0x0, 0x0, 0x0, 0xa, 0x4d, 0x4e, 0x45, 0x54, 0x3a, 0x43, 0x49, 0x4e, 0x46, 0x4f}
 )
 
 //************************************************************************
@@ -105,8 +106,6 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 	}
 	conn = sc.conn
 	sc.cu.Unlock()
-
-	//_ = conn
 
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&sc.totalReadMsgs, 1)
@@ -333,7 +332,6 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	defer sc.waiter.Done()
 
 	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
-
 	incoming := make([]byte, mnet.SmallestMinBufferSize)
 
 	for {
@@ -485,7 +483,6 @@ func (sc *websocketServerClient) handleCINFO(cm mnet.Client) error {
 }
 
 func (sc *websocketServerClient) handleRINFO(data []byte) error {
-
 	data = bytes.TrimPrefix(data, rinfoBytes)
 
 	var info mnet.Info
@@ -512,14 +509,48 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 	// Send to new client mnet.CINFO request
 	wc, err := sc.write(cm, len(cinfoBytes))
 	if err != nil {
+		sc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(sc.id),
+			metrics.With("client", sc.id),
+			metrics.With("network", sc.nid),
+			metrics.Message("websocketServerClient.Handshake: failed to send CINFO req"),
+		)
 		return err
 	}
 
-	wc.Write(cinfoBytes)
-	wc.Close()
-	sc.flush(cm)
+	if _, err := wc.Write(cinfoBytes); err != nil {
+		sc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(sc.id),
+			metrics.With("client", sc.id),
+			metrics.With("network", sc.nid),
+			metrics.Message("websocketServerClient.Handshake: failed to send CINFO req"),
+		)
+		return err
+	}
 
-	before := time.Now()
+	if err := wc.Close(); err != nil {
+		sc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(sc.id),
+			metrics.With("client", sc.id),
+			metrics.With("network", sc.nid),
+			metrics.Message("websocketServerClient.Handshake: failed to send CINFO req"),
+		)
+		return err
+	}
+
+	if err := sc.flush(cm); err != nil {
+		sc.metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(sc.id),
+			metrics.With("client", sc.id),
+			metrics.With("network", sc.nid),
+			metrics.Message("websocketServerClient.Handshake: failed to flush CINFO req"),
+		)
+		return err
+	}
 
 	sc.metrics.Emit(
 		metrics.WithID(sc.id),
@@ -528,21 +559,13 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 		metrics.With("local-addr", sc.localAddr),
 		metrics.With("remote-addr", sc.remoteAddr),
 		metrics.With("server-addr", sc.serverAddr),
-		metrics.Message("websocketServerClient.Handshake: Awating CINFO req"),
+		metrics.Message("websocketServerClient.Handshake: Awating CINFO response"),
 	)
+
+	before := time.Now()
 
 	// Wait for RCINFO response from connection.
 	for {
-		msg, err := sc.serverRead(cm)
-		if err != nil {
-			if err != mnet.ErrNoDataYet {
-				return err
-			}
-
-			//time.Sleep(mnet.InfoTemporarySleep)
-			continue
-		}
-
 		if time.Now().Sub(before) > sc.maxInfoWait {
 			sc.close(cm)
 			sc.metrics.Emit(
@@ -550,9 +573,17 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 				metrics.WithID(sc.id),
 				metrics.With("client", sc.id),
 				metrics.With("network", sc.nid),
-				metrics.Message("Timeout: awaiting mnet.RCINFo data"),
+				metrics.Message("websocketServerClient.Handshake:Timeout: awaiting mnet.RCINFo data"),
 			)
 			return mnet.ErrFailedToRecieveInfo
+		}
+
+		msg, err := sc.serverRead(cm)
+		if err != nil {
+			if err != mnet.ErrNoDataYet {
+				return err
+			}
+			continue
 		}
 
 		// First message should be a mnet.RCINFO response.
@@ -564,7 +595,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 				metrics.With("client", sc.id),
 				metrics.With("network", sc.nid),
 				metrics.With("data", string(msg)),
-				metrics.Message("Invalid mnet.RCINFO prefix"),
+				metrics.Message("websocketServerClient.Handshake:Invalid mnet.RCINFO prefix"),
 			)
 			return mnet.ErrFailedToRecieveInfo
 		}
@@ -576,7 +607,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 				metrics.With("client", sc.id),
 				metrics.With("network", sc.nid),
 				metrics.With("data", string(msg)),
-				metrics.Message("Invalid mnet.RCINFO data"),
+				metrics.Message("websocketServerClient.Handshake:Invalid mnet.RCINFO data"),
 			)
 			return err
 		}
@@ -604,16 +635,6 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 
 		// Wait for handshake completion signal.
 		for {
-			msg, err := sc.serverRead(cm)
-			if err != nil {
-				if err != mnet.ErrNoDataYet {
-					return err
-				}
-
-				//time.Sleep(mnet.InfoTemporarySleep)
-				continue
-			}
-
 			if time.Now().Sub(before) > sc.maxInfoWait {
 				sc.close(cm)
 				sc.metrics.Emit(
@@ -621,9 +642,18 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 					metrics.WithID(sc.id),
 					metrics.With("client", sc.id),
 					metrics.With("network", sc.nid),
-					metrics.Message("Failed to receive handshake completion before max wait"),
+					metrics.Message("websocketServerClient.Handshake:Failed to receive handshake completion before max wait"),
 				)
 				return mnet.ErrFailedToCompleteHandshake
+			}
+
+			msg, err := sc.serverRead(cm)
+			if err != nil {
+				if err != mnet.ErrNoDataYet {
+					return err
+				}
+
+				continue
 			}
 
 			if !bytes.Equal(msg, handshakeCompletedBytes) {
@@ -633,7 +663,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 					metrics.With("client", sc.id),
 					metrics.With("network", sc.nid),
 					metrics.With("data", string(msg)),
-					metrics.Message("Invalid handshake completion data"),
+					metrics.Message("websocketServerClient.Handshake:Invalid handshake completion data"),
 				)
 				return mnet.ErrFailedToCompleteHandshake
 			}
@@ -993,6 +1023,19 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 
 		if policy != nil {
 			go func() {
+				if err := n.isAlive(); err != nil {
+					return
+				}
+
+				n.Metrics.Emit(
+					metrics.WithID(mclient.ID),
+					metrics.With("addr", addr),
+					metrics.With("network", n.ID),
+					metrics.With("local-addr", client.localAddr),
+					metrics.With("remote-addr", client.remoteAddr),
+					metrics.Message("websocketServerClient.addWSClient: Applying retry policy"),
+				)
+
 				if err := policy.Retry(); err != nil {
 					n.Metrics.Emit(
 						metrics.Error(err),

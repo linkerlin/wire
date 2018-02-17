@@ -18,18 +18,12 @@ const (
 	// MaxFlushDeadline sets the maximum, allowed duration for flushing data
 	MaxFlushDeadline = 3 * time.Second
 
-	// MinBufferSize sets the initial size of space of the slice
-	// used to read in content from a net.Conn in the connections
-	// read loop.
-	MinBufferSize = 512
+	// MaxReadDeadline sets the maximum read deadline for reading from a net.Conn.
+	MaxReadDeadline = 3 * time.Second
 
-	// SmallestMinBufferSize sets the smallest buffer size acceptable for
-	// reading.
-	SmallestMinBufferSize = 128
-
-	// MaxBufferSize sets the maximum size allowed for all reads
-	// used in the readloop of a client's net.Conn.
-	MaxBufferSize = 64 * 1024
+	// MaxInfoWait sets the default duration to wait for arrival of connection info else
+	// closing the connection.
+	MaxInfoWait = time.Second * 5
 
 	// DefaultDialTimeout sets the default maximum time in seconds allowed before
 	// a net.Dialer exits attempt to dial a network.
@@ -43,13 +37,26 @@ const (
 	// to a cluster address.
 	DefaultClusterRetryDelay = 300 * time.Millisecond
 
+	// MinBufferSize sets the initial size of space of the slice
+	// used to read in content from a net.Conn in the connections
+	// read loop.
+	MinBufferSize = 512
+
+	// SmallestMinBufferSize sets the smallest buffer size acceptable for
+	// reading.
+	SmallestMinBufferSize = 128
+
+	// MaxHandshakeAttempts sets the maximum time a handshake can be attempted
+	// before closing connection.
+	MaxHandshakeAttempts = 20
+
+	// MaxBufferSize sets the maximum size allowed for all reads
+	// used in the readloop of a client's net.Conn.
+	MaxBufferSize = 64 * 1024
+
 	// MaxReconnectRetries defines the maximum retries allowed to reconnect to
 	// a cluster.
 	MaxReconnectRetries = 10
-
-	// MaxInfoWait sets the default duration to wait for arrival of connection info else
-	// closing the connection.
-	MaxInfoWait = time.Second * 5
 
 	// MaxConnections sets a default maximum connection allowed for a giving network.
 	MaxConnections = 8000
