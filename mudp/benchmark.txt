@@ -97,3 +97,24 @@ Benchmark8KMessages-4         	 3000000	       466 ns/op	17580.83 MB/s	      16 
 Benchmark16KMessages-4        	 3000000	       460 ns/op	35576.56 MB/s	      16 B/op	       1 allocs/op
 PASS
 ok  	github.com/influx6/mnet/mudp	23.583s
+
+Time: 17, Feb 2018
+goos: darwin
+goarch: amd64
+pkg: github.com/influx6/mnet/mudp
+BenchmarkNoBytesMessages-4    	 2000000	       737 ns/op	   8.14 MB/s	     160 B/op	       4 allocs/op
+Benchmark2BytesMessages-4     	 2000000	       705 ns/op	  11.34 MB/s	     160 B/op	       4 allocs/op
+Benchmark4BytesMessages-4     	 2000000	       675 ns/op	  14.80 MB/s	     160 B/op	       4 allocs/op
+Benchmark8BytesMessages-4     	 2000000	       664 ns/op	  21.08 MB/s	     160 B/op	       4 allocs/op
+Benchmark16BytesMessages-4    	 2000000	       664 ns/op	  33.12 MB/s	     160 B/op	       4 allocs/op
+Benchmark32BytesMessages-4    	 2000000	       675 ns/op	  56.29 MB/s	     160 B/op	       4 allocs/op
+Benchmark64BytesMessages-4    	 2000000	       665 ns/op	 105.11 MB/s	     160 B/op	       4 allocs/op
+Benchmark128BytesMessages-4   	 2000000	       676 ns/op	 197.94 MB/s	     160 B/op	       4 allocs/op
+Benchmark256BytesMessages-4   	 2000000	       677 ns/op	 386.93 MB/s	     160 B/op	       4 allocs/op
+Benchmark1KMessages-4         	 2000000	       690 ns/op	1491.33 MB/s	     160 B/op	       4 allocs/op
+Benchmark4KMessages-4         	 2000000	       807 ns/op	5081.76 MB/s	     160 B/op	       4 allocs/op
+Benchmark8KMessages-4         	 2000000	       906 ns/op	9046.89 MB/s	     160 B/op	       4 allocs/op
+Benchmark16KMessages-4        	 1000000	      1451 ns/op	11292.23 MB/s	     160 B/op	       4 allocs/op
+PASS
+ok  	github.com/influx6/mnet/mudp	27.503s
+

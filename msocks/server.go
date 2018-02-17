@@ -137,7 +137,7 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 					metrics.Error(err),
 					metrics.WithID(sc.id),
 					metrics.With("network", sc.nid),
-					metrics.Message("Connection failed to preflush existing data before new write"),
+					metrics.Message("Connection failed to pre-flush existing data before new write"),
 				)
 				return err
 			}

@@ -142,9 +142,7 @@ func benchThis(b *testing.B, payload []byte) {
 		return
 	}
 
-	netw.MaxWriterSize = defaultClientSize
-
-	client, err := mudp.Connect("localhost:5050", mudp.Metrics(events), mudp.MaxBuffer(defaultClientSize))
+	client, err := mudp.Connect("localhost:5050", mudp.Metrics(events))
 	if err != nil {
 		b.Fatalf("Failed to dial network %+q", err)
 		return

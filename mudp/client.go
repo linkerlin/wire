@@ -1,7 +1,9 @@
 package mudp
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net"
 	"sync/atomic"
 	"time"
@@ -33,14 +35,6 @@ type ConnectOptions func(conn *clientConn)
 func WriteInterval(dur time.Duration) ConnectOptions {
 	return func(cm *clientConn) {
 		cm.maxDeadline = dur
-	}
-}
-
-// MaxBuffer sets the clientNetwork to use the provided value
-// as its maximum buffer size for it's writer.
-func MaxBuffer(buffer int) ConnectOptions {
-	return func(cm *clientConn) {
-		cm.maxWrite = buffer
 	}
 }
 
@@ -106,7 +100,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	//host, _, _ := net.SplitHostPort(addr)
 
 	network := new(clientConn)
-	network.udpServerClient = new(udpServerClient)
 
 	for _, op := range ops {
 		op(network)
@@ -118,10 +111,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 
 	if network.metrics == nil {
 		network.metrics = metrics.New()
-	}
-
-	if network.maxWrite <= 0 {
-		network.maxWrite = mnet.MaxBufferSize
 	}
 
 	if network.maxDeadline <= 0 {
@@ -136,6 +125,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	}
 
 	network.parser = new(internal.TaggedMessages)
+	network.br = internal.NewLengthRecvReader(nil, mnet.HeaderLength)
 
 	c.NID = network.nid
 	c.Metrics = network.metrics
@@ -144,10 +134,10 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.WriteFunc = network.write
 	c.FlushFunc = network.flush
 	c.LiveFunc = network.isAlive
-	c.StatisticFunc = network.getStatistics
+	c.StatisticFunc = network.stats
 	c.LiveFunc = network.isAlive
-	c.LocalAddrFunc = network.getLocalAddr
-	c.RemoteAddrFunc = network.getRemoteAddr
+	c.LocalAddrFunc = network.localAddr
+	c.RemoteAddrFunc = network.remoteAddr
 	c.ReconnectionFunc = network.reconnect
 
 	if err := network.reconnect(c, addr); err != nil {
@@ -161,20 +151,218 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 // It embeds the udpServerClient and adds extra methods to provide client
 // side behaviours.
 type clientConn struct {
-	*udpServerClient
-	network     string
+	readBuffer int
+	started    int64
+	network    string
+
+	maxDeadline time.Duration
+
 	dialer      *net.Dialer
 	waiter      sync.WaitGroup
 	keepTimeout time.Duration
 	dialTimeout time.Duration
-	started     int64
-	readBuffer  int
-	ctx         context.Context
-	cancel      func()
+	metrics     metrics.Metrics
+
+	ctx    context.Context
+	cancel func()
+
+	id       string
+	nid      string
+	mainAddr net.Addr
+	target   net.Addr
+	raddr    net.Addr
+	laddr    net.Addr
+	parser   *internal.TaggedMessages
+
+	totalRead     int64
+	totalWritten  int64
+	totalFlushed  int64
+	totalMsgWrite int64
+	totalMsgRead  int64
+	reconnects    int64
+	closed        int64
+
+	br   *internal.LengthRecvReader
+	cu   sync.Mutex
+	conn net.Conn
+	bu   sync.Mutex
+	bw   *bufio.Writer
+}
+
+func (cn *clientConn) readIncoming(r io.Reader) error {
+	cn.br.Reset(r)
+
+	var data []byte
+	for {
+		size, err := cn.br.ReadHeader()
+		if err != nil {
+			if err != io.EOF {
+				return err
+			}
+
+			return nil
+		}
+
+		data = make([]byte, size)
+		_, err = cn.br.Read(data)
+		if err != nil {
+			return err
+		}
+
+		if err = cn.parser.Parse(data); err != nil {
+			return err
+		}
+	}
+}
+
+func (cn *clientConn) localAddr(cm mnet.Client) (net.Addr, error) {
+	return cn.laddr, nil
+}
+
+func (cn *clientConn) remoteAddr(cm mnet.Client) (net.Addr, error) {
+	return cn.raddr, nil
+}
+
+func (cn *clientConn) read(cm mnet.Client) ([]byte, error) {
+	if err := cn.isAlive(cm); err != nil {
+		return nil, err
+	}
+
+	atomic.AddInt64(&cn.totalMsgRead, 1)
+	indata, err := cn.parser.Next()
+	atomic.AddInt64(&cn.totalRead, int64(len(indata)))
+	return indata, err
+}
+
+func (cn *clientConn) noop(cm mnet.Client) error {
+	return nil
+}
+
+func (cn *clientConn) stats(cm mnet.Client) (mnet.ClientStatistic, error) {
+	var stats mnet.ClientStatistic
+	stats.ID = cn.id
+	stats.Local = cn.laddr
+	stats.Remote = cn.raddr
+	stats.BytesRead = atomic.LoadInt64(&cn.totalRead)
+	stats.MessagesRead = atomic.LoadInt64(&cn.totalMsgRead)
+	stats.BytesWritten = atomic.LoadInt64(&cn.totalWritten)
+	stats.BytesFlushed = atomic.LoadInt64(&cn.totalFlushed)
+	stats.Reconnects = atomic.LoadInt64(&cn.reconnects)
+	stats.MessagesWritten = atomic.LoadInt64(&cn.totalMsgWrite)
+	return stats, nil
 }
 
 func (cn *clientConn) isStarted() bool {
 	return atomic.LoadInt64(&cn.started) == 1
+}
+
+func (cn *clientConn) isAlive(cm mnet.Client) error {
+	if atomic.LoadInt64(&cn.closed) == 1 && cn.isStarted() {
+		return mnet.ErrAlreadyClosed
+	}
+	return nil
+}
+
+// write returns an appropriate io.WriteCloser with appropriate size
+// to contain data to be written to be connection.
+func (cn *clientConn) flush(cm mnet.Client) error {
+	if err := cn.isAlive(cm); err != nil {
+		return err
+	}
+
+	var conn net.Conn
+	cn.cu.Lock()
+	conn = cn.conn
+	cn.cu.Unlock()
+
+	if conn == nil {
+		return mnet.ErrAlreadyClosed
+	}
+
+	cn.bu.Lock()
+	defer cn.bu.Unlock()
+
+	if cn.bw == nil {
+		return mnet.ErrAlreadyClosed
+	}
+
+	buffered := cn.bw.Buffered()
+	atomic.AddInt64(&cn.totalFlushed, int64(buffered))
+
+	if buffered > 0 {
+		//conn.SetWriteDeadline(time.Now().Add(cn.maxDeadline))
+		if err := cn.bw.Flush(); err != nil {
+			//conn.SetWriteDeadline(time.Time{})
+			return err
+		}
+		//conn.SetWriteDeadline(time.Time{})
+	}
+
+	return nil
+}
+
+func (cn *clientConn) writeAction(size []byte, data []byte) error {
+	atomic.AddInt64(&cn.totalWritten, 1)
+	atomic.AddInt64(&cn.totalWritten, int64(len(data)))
+
+	cn.bu.Lock()
+	defer cn.bu.Unlock()
+
+	if cn.bw == nil {
+		return mnet.ErrAlreadyClosed
+	}
+
+	available := cn.bw.Available()
+	buffered := cn.bw.Buffered()
+	atomic.AddInt64(&cn.totalFlushed, int64(buffered))
+
+	// size of next write.
+	toWrite := buffered + len(data)
+
+	// add size header
+	toWrite += mnet.HeaderLength
+
+	if toWrite > available {
+		if err := cn.bw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if _, err := cn.bw.Write(size); err != nil {
+		return err
+	}
+
+	if _, err := cn.bw.Write(data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// write returns an appropriate io.WriteCloser with appropriate size
+// to contain data to be written to be connection.
+func (cn *clientConn) write(cm mnet.Client, size int) (io.WriteCloser, error) {
+	if err := cn.isAlive(cm); err != nil {
+		return nil, err
+	}
+
+	var conn net.Conn
+	cn.cu.Lock()
+	conn = cn.conn
+	cn.cu.Unlock()
+
+	if conn == nil {
+		return nil, mnet.ErrAlreadyClosed
+	}
+
+	newWriter := actionWriterPool.Get().(*internal.ActionLengthWriter)
+	newWriter.Reset(func(size []byte, data []byte) error {
+		err := cn.writeAction(size, data)
+		actionWriterPool.Put(newWriter)
+		return err
+	}, mnet.HeaderLength, size)
+
+	return newWriter, nil
 }
 
 func (cn *clientConn) close(jn mnet.Client) error {
@@ -204,7 +392,7 @@ func (cn *clientConn) close(jn mnet.Client) error {
 	cn.cu.Unlock()
 
 	cn.bu.Lock()
-	cn.buffer = nil
+	cn.bw = nil
 	cn.bu.Unlock()
 
 	return err
@@ -227,32 +415,27 @@ func (cn *clientConn) reconnect(jn mnet.Client, addr string) error {
 			return err
 		}
 
-		cn.remoteAddr = raddr
+		cn.raddr = raddr
 	}
 
-	conn, err := cn.getConn(jn, cn.remoteAddr)
+	conn, err := cn.getConn(jn, cn.raddr)
 	if err != nil {
 		return err
 	}
 
-	cn.localAddr = conn.LocalAddr()
-	cn.mainAddr = cn.localAddr
+	cn.laddr = conn.LocalAddr()
+	cn.mainAddr = conn.LocalAddr()
 
 	cn.cu.Lock()
 	cn.conn = conn
 	cn.cu.Unlock()
 
 	cn.bu.Lock()
-	cn.buffer = bufio.NewWriterSize(targetConn{
-		conn:   conn,
-		client: true,
-		target: cn.remoteAddr,
-	}, cn.maxWrite)
+	cn.bw = bufio.NewWriterSize(conn, mnet.MaxBufferSize)
 	cn.bu.Unlock()
 
 	cn.waiter.Add(1)
 	go cn.readLoop(conn, jn)
-
 	return nil
 }
 
@@ -260,68 +443,74 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 	defer cn.close(jn)
 	defer cn.waiter.Done()
 
+	var tmpReader io.Reader
 	incoming := make([]byte, mnet.MinBufferSize)
 	for {
 		select {
 		case <-cn.ctx.Done():
 			return
 		default:
-			nn, _, err := conn.ReadFrom(incoming)
+			nn, addr, err := conn.ReadFrom(incoming)
 			if err != nil {
 				cn.metrics.Send(metrics.Entry{
 					ID:      cn.id,
-					Message: "Connection failed to read: closing",
-					Level:   metrics.ErrorLvl,
-					Field: metrics.Field{
-						"err": err,
-					},
-				})
-
-				continue
-			}
-
-			atomic.AddInt64(&cn.totalRead, int64(nn))
-			if err := cn.parser.Parse(incoming[:nn]); err != nil {
-				cn.metrics.Send(metrics.Entry{
-					ID:      cn.id,
-					Message: "ParseError: failed to parse message",
+					Message: "failed to read message from connection",
 					Level:   metrics.ErrorLvl,
 					Field: metrics.Field{
 						"err":  err,
-						"data": string(incoming[:nn]),
+						"addr": addr,
 					},
 				})
-				return
+
+				continue
+			}
+
+			cn.metrics.Send(metrics.Entry{
+				ID:      cn.id,
+				Message: "Received new message",
+				Level:   metrics.InfoLvl,
+				Field: metrics.Field{
+					"addr":   addr,
+					"length": nn,
+					"data":   string(incoming[:nn]),
+				},
+			})
+
+			atomic.AddInt64(&cn.totalRead, int64(nn))
+			tmpReader = bytes.NewReader(incoming[:nn])
+			if err := cn.readIncoming(tmpReader); err != nil {
+				cn.metrics.Send(metrics.Entry{
+					ID:      cn.id,
+					Message: "client unable to handle message",
+					Level:   metrics.ErrorLvl,
+					Field: metrics.Field{
+						"err":    err,
+						"addr":   addr,
+						"length": nn,
+						"data":   string(incoming[:nn]),
+					},
+				})
+				continue
 			}
 
 			// Lets resize buffer within area.
-			if nn < mnet.MinBufferSize {
-				incoming = make([]byte, mnet.MinBufferSize/2)
-				continue
+			if nn == len(incoming) && nn < mnet.MaxBufferSize {
+				incoming = incoming[0 : mnet.MinBufferSize*2]
 			}
 
-			if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
-				incoming = make([]byte, mnet.MinBufferSize*2)
-				continue
+			if nn < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
+				incoming = incoming[0 : len(incoming)/2]
 			}
 
-			if nn > mnet.MinBufferSize && nn <= cn.maxWrite/2 {
-				incoming = make([]byte, cn.maxWrite/2)
-				continue
+			if nn > len(incoming) && len(incoming) > mnet.MinBufferSize && nn < mnet.MaxBufferSize {
+				incoming = incoming[0 : mnet.MaxBufferSize/2]
 			}
-
-			if nn > mnet.MinBufferSize && nn >= cn.maxWrite/2 {
-				incoming = make([]byte, cn.maxWrite)
-				continue
-			}
-
-			incoming = make([]byte, mnet.MinBufferSize)
 		}
 	}
 }
 
 // getConn returns net.Conn for giving addr.
-func (cn *clientConn) getConn(_ mnet.Client, addr net.Addr) (*net.UDPConn, error) {
+func (cn *clientConn) getConn(cm mnet.Client, addr net.Addr) (*net.UDPConn, error) {
 	lastSleep := mnet.MinTemporarySleep
 
 	var err error
@@ -332,9 +521,9 @@ func (cn *clientConn) getConn(_ mnet.Client, addr net.Addr) (*net.UDPConn, error
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
-				metrics.With("type", "tcp"),
 				metrics.With("addr", addr),
 				metrics.With("network", cn.nid),
+				metrics.With("type", "udp"),
 				metrics.Message("Connection: failed to connect"),
 			)
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {

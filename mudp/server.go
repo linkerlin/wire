@@ -1,8 +1,8 @@
 package mudp
 
 import (
+	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"net"
 	"sync/atomic"
@@ -16,170 +16,112 @@ import (
 
 	"github.com/influx6/faux/metrics"
 	"github.com/influx6/faux/netutils"
-	"github.com/influx6/faux/pools/done"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/internal"
-	uuid "github.com/satori/go.uuid"
+	"github.com/satori/go.uuid"
 )
 
 var (
-	bufferPool = done.NewDonePool(218, 20)
+	actionWriterPool = sync.Pool{
+		New: func() interface{} {
+			return new(internal.ActionLengthWriter)
+		},
+	}
 )
+
+type proxyWriter struct {
+	target net.Addr
+	conn   *net.UDPConn
+}
+
+func (pw proxyWriter) Write(d []byte) (int, error) {
+	return pw.conn.WriteTo(d, pw.target)
+}
 
 // targetConn targets a giving connections net.Addr,
 // using the underline udp connection.
 type targetConn struct {
-	target net.Addr
-	client bool
-	conn   *net.UDPConn
+	id       string
+	nid      string
+	mainAddr net.Addr
+	target   net.Addr
+	raddr    net.Addr
+	laddr    net.Addr
+	metrics  metrics.Metrics
+	parser   *internal.TaggedMessages
+
+	maxWrite    int
+	maxDeadline time.Duration
+
+	totalRead     int64
+	totalWritten  int64
+	totalFlushed  int64
+	totalMsgWrite int64
+	totalMsgRead  int64
+	reconnects    int64
+	closed        int64
+
+	br      *internal.LengthRecvReader
+	bu      sync.Mutex
+	bw      *bufio.Writer
+	network *UDPNetwork
 }
 
-// Write implements the io.Writer logic.
-func (t targetConn) Write(d []byte) (int, error) {
-	if t.client {
-		return t.conn.Write(d)
-	}
+func (n *targetConn) readIncoming(r io.Reader) error {
+	n.br.Reset(r)
 
-	return t.conn.WriteTo(d, t.target)
-}
-
-type udpServerClient struct {
-	totalRead      int64
-	totalWritten   int64
-	totalFlushOut  int64
-	totalWriteMsgs int64
-	totalReadMsgs  int64
-	closedCounter  int64
-	maxWrite       int
-	maxDeadline    time.Duration
-	id             string
-	nid            string
-	mainAddr       net.Addr
-	localAddr      net.Addr
-	remoteAddr     net.Addr
-	metrics        metrics.Metrics
-	parser         *internal.TaggedMessages
-	network        *UDPNetwork
-	bu             sync.Mutex
-	buffer         *bufio.Writer
-	cu             sync.Mutex
-	conn           *net.UDPConn
-}
-
-func (nc *udpServerClient) getRemoteAddr(_ mnet.Client) (net.Addr, error) {
-	return nc.remoteAddr, nil
-}
-
-func (nc *udpServerClient) getLocalAddr(_ mnet.Client) (net.Addr, error) {
-	return nc.localAddr, nil
-}
-
-func (nc *udpServerClient) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error) {
-	var stats mnet.ClientStatistic
-	stats.ID = nc.id
-	stats.Local = nc.localAddr
-	stats.Remote = nc.remoteAddr
-	stats.BytesRead = atomic.LoadInt64(&nc.totalRead)
-	stats.BytesFlushed = atomic.LoadInt64(&nc.totalFlushOut)
-	stats.BytesWritten = atomic.LoadInt64(&nc.totalWritten)
-	stats.MessagesRead = atomic.LoadInt64(&nc.totalReadMsgs)
-	stats.MessagesWritten = atomic.LoadInt64(&nc.totalWriteMsgs)
-	return stats, nil
-}
-
-func (nc *udpServerClient) write(mn mnet.Client, size int) (io.WriteCloser, error) {
-	if err := nc.isAlive(mn); err != nil {
-		return nil, err
-	}
-
-	var conn *net.UDPConn
-	nc.cu.Lock()
-	conn = nc.conn
-	nc.cu.Unlock()
-
-	if conn == nil {
-		return nil, mnet.ErrAlreadyClosed
-	}
-
-	return bufferPool.Get(size, func(d int, from io.WriterTo) error {
-		atomic.AddInt64(&nc.totalWriteMsgs, 1)
-		atomic.AddInt64(&nc.totalWritten, int64(d))
-
-		nc.bu.Lock()
-		defer nc.bu.Unlock()
-
-		if nc.buffer == nil {
-			return mnet.ErrAlreadyClosed
-		}
-
-		buffered := nc.buffer.Buffered()
-		atomic.AddInt64(&nc.totalFlushOut, int64(buffered))
-
-		// size of next write.
-		toWrite := buffered + d
-
-		// add size header
-		toWrite += mnet.HeaderLength
-
-		if toWrite >= nc.maxWrite {
-			if err := nc.buffer.Flush(); err != nil {
+	data := make([]byte, mnet.SmallestMinBufferSize)
+	for {
+		size, err := n.br.ReadHeader()
+		if err != nil {
+			if err != io.EOF {
 				return err
 			}
+
+			return nil
 		}
 
-		// write length header first.
-		header := make([]byte, mnet.HeaderLength)
-		binary.BigEndian.PutUint32(header, uint32(d))
-		nc.buffer.Write(header)
+		data = make([]byte, size)
+		_, err = n.br.Read(data)
+		if err != nil {
+			return err
+		}
 
-		// then flush data alongside header.
-		_, err := from.WriteTo(nc.buffer)
-		return err
-	}), nil
-}
-
-func (nc *udpServerClient) isAlive(_ mnet.Client) error {
-	if atomic.LoadInt64(&nc.closedCounter) == 1 {
-		return mnet.ErrAlreadyClosed
+		if err = n.parser.Parse(data); err != nil {
+			return err
+		}
 	}
-	return nil
 }
 
-func (nc *udpServerClient) read(mn mnet.Client) ([]byte, error) {
-	if err := nc.isAlive(mn); err != nil {
-		return nil, err
-	}
-
-	atomic.AddInt64(&nc.totalReadMsgs, 1)
-	indata, err := nc.parser.Next()
-	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
-	return indata, err
-}
-
-func (nc *udpServerClient) flush(mn mnet.Client) error {
-	if err := nc.isAlive(mn); err != nil {
+// write returns an appropriate io.WriteCloser with appropriate size
+// to contain data to be written to be connection.
+func (n *targetConn) flush(cm mnet.Client) error {
+	if err := n.network.isAlive(); err != nil {
 		return err
 	}
 
-	if atomic.LoadInt64(&nc.closedCounter) == 1 {
-		return mnet.ErrAlreadyClosed
-	}
-
-	var conn *net.UDPConn
-	nc.cu.Lock()
-	conn = nc.conn
-	nc.cu.Unlock()
+	var conn net.Conn
+	n.network.mu.Lock()
+	conn = n.network.conn
+	n.network.mu.Unlock()
 
 	if conn == nil {
 		return mnet.ErrAlreadyClosed
 	}
 
-	nc.bu.Lock()
-	defer nc.bu.Unlock()
+	n.bu.Lock()
+	defer n.bu.Unlock()
 
-	if nc.buffer.Buffered() != 0 {
-		//conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
-		if err := nc.buffer.Flush(); err != nil {
+	if n.bw == nil {
+		return mnet.ErrAlreadyClosed
+	}
+
+	buffered := n.bw.Buffered()
+	atomic.AddInt64(&n.totalFlushed, int64(buffered))
+
+	if buffered > 0 {
+		//conn.SetWriteDeadline(time.Now().Add(n.maxDeadline))
+		if err := n.bw.Flush(); err != nil {
 			//conn.SetWriteDeadline(time.Time{})
 			return err
 		}
@@ -189,37 +131,117 @@ func (nc *udpServerClient) flush(mn mnet.Client) error {
 	return nil
 }
 
-func (nc *udpServerClient) close(mn mnet.Client) error {
-	if err := nc.isAlive(mn); err != nil {
+func (n *targetConn) writeAction(size []byte, data []byte) error {
+	atomic.AddInt64(&n.totalWritten, 1)
+	atomic.AddInt64(&n.totalWritten, int64(len(data)))
+
+	n.bu.Lock()
+	defer n.bu.Unlock()
+
+	if n.bw == nil {
+		return mnet.ErrAlreadyClosed
+	}
+
+	available := n.bw.Available()
+	buffered := n.bw.Buffered()
+	atomic.AddInt64(&n.totalFlushed, int64(buffered))
+
+	// size of next write.
+	toWrite := buffered + len(data)
+
+	// add size header
+	toWrite += mnet.HeaderLength
+
+	if toWrite > available {
+		if err := n.bw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if _, err := n.bw.Write(size); err != nil {
 		return err
 	}
 
-	atomic.StoreInt64(&nc.closedCounter, 1)
-
-	nc.flush(mn)
-
-	nc.cu.Lock()
-	if nc.conn == nil {
-		nc.cu.Unlock()
-		return mnet.ErrAlreadyClosed
+	if _, err := n.bw.Write(data); err != nil {
+		return err
 	}
-	nc.cu.Unlock()
-
-	if nc.network != nil {
-		nc.network.cu.Lock()
-		delete(nc.network.clients, nc.mainAddr.String())
-		nc.network.cu.Unlock()
-	}
-
-	nc.cu.Lock()
-	nc.conn = nil
-	nc.cu.Unlock()
-
-	nc.bu.Lock()
-	nc.buffer = nil
-	nc.bu.Unlock()
 
 	return nil
+}
+
+// write returns an appropriate io.WriteCloser with appropriate size
+// to contain data to be written to be connection.
+func (n *targetConn) write(cm mnet.Client, size int) (io.WriteCloser, error) {
+	if err := n.isAlive(cm); err != nil {
+		return nil, err
+	}
+
+	var conn net.Conn
+	n.network.mu.Lock()
+	conn = n.network.conn
+	n.network.mu.Unlock()
+
+	if conn == nil {
+		return nil, mnet.ErrAlreadyClosed
+	}
+
+	newWriter := actionWriterPool.Get().(*internal.ActionLengthWriter)
+	newWriter.Reset(func(size []byte, data []byte) error {
+		err := n.writeAction(size, data)
+		actionWriterPool.Put(newWriter)
+		return err
+	}, mnet.HeaderLength, size)
+
+	return newWriter, nil
+}
+
+func (n *targetConn) localAddr(cm mnet.Client) (net.Addr, error) {
+	return n.laddr, nil
+}
+
+func (n *targetConn) remoteAddr(cm mnet.Client) (net.Addr, error) {
+	return n.raddr, nil
+}
+
+func (n *targetConn) read(cm mnet.Client) ([]byte, error) {
+	if err := n.isAlive(cm); err != nil {
+		return nil, err
+	}
+
+	atomic.AddInt64(&n.totalMsgRead, 1)
+	indata, err := n.parser.Next()
+	atomic.AddInt64(&n.totalRead, int64(len(indata)))
+	return indata, err
+}
+
+func (n *targetConn) noop(cm mnet.Client) error {
+	return nil
+}
+
+func (n *targetConn) isAlive(cm mnet.Client) error {
+	if atomic.LoadInt64(&n.closed) == 1 {
+		return mnet.ErrAlreadyClosed
+	}
+	return n.network.isAlive()
+}
+
+func (n *targetConn) close(cm mnet.Client) error {
+	atomic.StoreInt64(&n.closed, 1)
+	return nil
+}
+
+func (n *targetConn) stats(cm mnet.Client) (mnet.ClientStatistic, error) {
+	var stats mnet.ClientStatistic
+	stats.ID = n.id
+	stats.Local = n.laddr
+	stats.Remote = n.raddr
+	stats.BytesRead = atomic.LoadInt64(&n.totalRead)
+	stats.MessagesRead = atomic.LoadInt64(&n.totalMsgRead)
+	stats.BytesWritten = atomic.LoadInt64(&n.totalWritten)
+	stats.BytesFlushed = atomic.LoadInt64(&n.totalFlushed)
+	stats.Reconnects = atomic.LoadInt64(&n.reconnects)
+	stats.MessagesWritten = atomic.LoadInt64(&n.totalMsgWrite)
+	return stats, nil
 }
 
 // UDPNetwork defines a network which runs ontop of provided mnet.ConnHandler.
@@ -238,10 +260,6 @@ type UDPNetwork struct {
 	// udp listener will error out.
 	ReadBuffer int
 
-	// MaxWriterSize sets the maximum size of bufio.Writer for
-	// network connection.
-	MaxWriterSize int
-
 	// MaxWriterDeadline sets deadline to be enforced when writing
 	// to network.
 	MaxWriteDeadline time.Duration
@@ -258,7 +276,7 @@ type UDPNetwork struct {
 	laddr   net.Addr
 	rung    sync.WaitGroup
 	cu      sync.RWMutex
-	clients map[string]*udpServerClient
+	clients map[string]*targetConn
 	mu      sync.Mutex
 	conn    *net.UDPConn
 }
@@ -279,6 +297,11 @@ func (n *UDPNetwork) isActive(ctx context.Context) bool {
 	}
 }
 
+// Wait blocks the call till all go-routines created by network has shutdown.
+func (n *UDPNetwork) Wait() {
+	n.rung.Wait()
+}
+
 // Start boots up the server and initializes all internals to make
 // itself ready for servicing requests.
 func (n *UDPNetwork) Start(ctx context.Context) error {
@@ -286,7 +309,7 @@ func (n *UDPNetwork) Start(ctx context.Context) error {
 		return err
 	}
 
-	n.clients = make(map[string]*udpServerClient)
+	n.clients = make(map[string]*targetConn)
 
 	if n.UDPNetwork == "" {
 		n.UDPNetwork = "udp"
@@ -298,6 +321,10 @@ func (n *UDPNetwork) Start(ctx context.Context) error {
 
 	if n.ID == "" {
 		n.ID = uuid.NewV4().String()
+	}
+
+	if n.MaxWriteDeadline <= 0 {
+		n.MaxWriteDeadline = mnet.MaxFlushDeadline
 	}
 
 	n.Addr = netutils.GetAddr(n.Addr)
@@ -344,11 +371,6 @@ func (n *UDPNetwork) Start(ctx context.Context) error {
 	go n.handleConnections(ctx, serverConn)
 	go n.handleCloseRequest(ctx, serverConn)
 
-	go func() {
-		n.Wait()
-		atomic.StoreInt64(&n.started, 0)
-	}()
-
 	return nil
 }
 
@@ -356,11 +378,6 @@ func (n *UDPNetwork) handleCloseRequest(ctx context.Context, con *net.UDPConn) {
 	defer n.rung.Done()
 	<-ctx.Done()
 	con.Close()
-}
-
-// Wait blocks the call till all go-routines created by network has shutdown.
-func (n *UDPNetwork) Wait() {
-	n.rung.Wait()
 }
 
 func (n *UDPNetwork) getAllClient(skipAddr net.Addr) []mnet.Client {
@@ -377,15 +394,14 @@ func (n *UDPNetwork) getAllClient(skipAddr net.Addr) []mnet.Client {
 		mclient.ID = client.id
 		mclient.Metrics = n.Metrics
 		mclient.WriteFunc = client.write
-		//mclient.StreamFunc = client.stream
-		mclient.ReaderFunc = client.read
 		mclient.FlushFunc = client.flush
 		mclient.LiveFunc = client.isAlive
-		mclient.StatisticFunc = client.getStatistics
-		mclient.LocalAddrFunc = client.getLocalAddr
-		mclient.RemoteAddrFunc = client.getRemoteAddr
+		mclient.StatisticFunc = client.stats
+		mclient.LocalAddrFunc = client.localAddr
+		mclient.RemoteAddrFunc = client.remoteAddr
+
 		mclient.SiblingsFunc = func(_ mnet.Client) ([]mnet.Client, error) {
-			return n.getAllClient(client.localAddr), nil
+			return n.getAllClient(client.mainAddr), nil
 		}
 
 		clients = append(clients, mclient)
@@ -395,30 +411,27 @@ func (n *UDPNetwork) getAllClient(skipAddr net.Addr) []mnet.Client {
 }
 
 // addClient adds a new network connection into the network.
-func (n *UDPNetwork) addClient(addr net.Addr, core *net.UDPConn) *udpServerClient {
+func (n *UDPNetwork) addClient(addr net.Addr, conn *net.UDPConn) *targetConn {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
 	client, ok := n.clients[addr.String()]
 	if !ok {
-		client = new(udpServerClient)
+		client = new(targetConn)
 		client.nid = n.ID
 		client.network = n
-		client.conn = core
+		client.target = addr
 		client.mainAddr = addr
-		client.remoteAddr = addr
-		client.localAddr = n.laddr
 		client.metrics = n.Metrics
-		client.parser = new(internal.TaggedMessages)
+		client.laddr = conn.LocalAddr()
+		client.raddr = conn.RemoteAddr()
 		client.id = uuid.NewV4().String()
-		client.maxWrite = n.MaxWriterSize
 		client.maxDeadline = n.MaxWriteDeadline
-		client.buffer = bufio.NewWriterSize(targetConn{
-			conn:   core,
-			target: addr,
-		}, n.MaxWriterSize)
+		client.parser = new(internal.TaggedMessages)
+		client.br = internal.NewLengthRecvReader(nil, mnet.HeaderLength)
+		client.bw = bufio.NewWriterSize(proxyWriter{conn: conn, target: addr}, mnet.MaxBufferSize)
 
-		// store client in map.
+		// store client in network clients map.
 		n.clients[addr.String()] = client
 
 		var mclient mnet.Client
@@ -427,23 +440,29 @@ func (n *UDPNetwork) addClient(addr net.Addr, core *net.UDPConn) *udpServerClien
 		mclient.ID = client.id
 		mclient.CloseFunc = client.close
 		mclient.WriteFunc = client.write
-		mclient.ReaderFunc = client.read
 		mclient.FlushFunc = client.flush
+		mclient.ReaderFunc = client.read
 		mclient.LiveFunc = client.isAlive
-		mclient.StatisticFunc = client.getStatistics
-		mclient.LiveFunc = client.isAlive
-		mclient.LocalAddrFunc = client.getLocalAddr
-		mclient.RemoteAddrFunc = client.getRemoteAddr
+		mclient.StatisticFunc = client.stats
+		mclient.LocalAddrFunc = client.localAddr
+		mclient.RemoteAddrFunc = client.remoteAddr
+
 		mclient.SiblingsFunc = func(_ mnet.Client) ([]mnet.Client, error) {
 			return n.getAllClient(addr), nil
 		}
 
 		n.rung.Add(1)
 		go func(mc mnet.Client, addr net.Addr) {
+			defer atomic.StoreInt64(&client.closed, 1)
 			defer n.rung.Done()
 
 			if err := n.Handler(mc); err != nil {
-				atomic.StoreInt64(&client.closedCounter, 1)
+				n.Metrics.Emit(
+					metrics.Error(err),
+					metrics.WithID(client.id),
+					metrics.With("network", n.ID),
+					metrics.Message("Connection Handler exiting"),
+				)
 			}
 
 			n.cu.Lock()
@@ -459,12 +478,22 @@ func (n *UDPNetwork) addClient(addr net.Addr, core *net.UDPConn) *udpServerClien
 func (n *UDPNetwork) handleConnections(ctx context.Context, conn *net.UDPConn) {
 	defer n.rung.Done()
 	defer n.handleCloseConnections(ctx)
+	defer atomic.StoreInt64(&n.started, 0)
 
-	incoming := make([]byte, mnet.MinBufferSize)
+	var tmpReader io.Reader
+	incoming := make([]byte, mnet.MinBufferSize, mnet.MaxBufferSize)
 
 	for {
 		select {
 		case <-ctx.Done():
+			n.Metrics.Send(metrics.Entry{
+				ID:      n.ID,
+				Message: "closing network read loop",
+				Level:   metrics.ErrorLvl,
+				Field: metrics.Field{
+					"addr": n.addr,
+				},
+			})
 			return
 		default:
 			nn, addr, err := conn.ReadFrom(incoming)
@@ -475,68 +504,68 @@ func (n *UDPNetwork) handleConnections(ctx context.Context, conn *net.UDPConn) {
 					Level:   metrics.ErrorLvl,
 					Field: metrics.Field{
 						"err":  err,
-						"addr": addr,
+						"addr": n.addr,
 					},
 				})
 
 				continue
 			}
 
+			n.Metrics.Send(metrics.Entry{
+				ID:      n.ID,
+				Message: "Received new message",
+				Level:   metrics.InfoLvl,
+				Field: metrics.Field{
+					"addr":   addr,
+					"length": nn,
+					"data":   string(incoming[:nn]),
+				},
+			})
+
 			client := n.addClient(addr, conn)
 			atomic.AddInt64(&client.totalRead, int64(nn))
-			if err := client.parser.Parse(incoming[:nn]); err != nil {
+
+			tmpReader = bytes.NewReader(incoming[:nn])
+			if err := client.readIncoming(tmpReader); err != nil {
 				n.Metrics.Send(metrics.Entry{
 					ID:      n.ID,
-					Message: "client unable to handle message",
+					Message: "client unable to process message",
 					Level:   metrics.ErrorLvl,
 					Field: metrics.Field{
-						"err":  err,
-						"addr": addr,
-						"data": string(incoming[:nn]),
+						"err":    err,
+						"addr":   addr,
+						"length": nn,
+						"data":   string(incoming[:nn]),
 					},
 				})
 				continue
 			}
 
 			// Lets resize buffer within area.
-			//if nn < mnet.MinBufferSize {
-			//	incoming = make([]byte, mnet.MinBufferSize/2)
-			//	continue
-			//}
-
-			if nn > mnet.MinBufferSize && nn <= mnet.MinBufferSize*2 {
-				incoming = make([]byte, mnet.MinBufferSize*2)
-				continue
+			if nn == len(incoming) && nn < mnet.MaxBufferSize {
+				incoming = incoming[0 : mnet.MinBufferSize*2]
 			}
 
-			if nn > mnet.MinBufferSize && nn <= n.MaxWriterSize/2 {
-				incoming = make([]byte, n.MaxWriterSize/2)
-				continue
+			if nn < len(incoming)/2 && len(incoming) > mnet.MinBufferSize {
+				incoming = incoming[0 : len(incoming)/2]
 			}
 
-			if nn > mnet.MinBufferSize && nn >= n.MaxWriterSize/2 {
-				incoming = make([]byte, n.MaxWriterSize)
-				continue
+			if nn > len(incoming) && len(incoming) > mnet.MinBufferSize && nn <= mnet.MaxBufferSize/2 {
+				incoming = incoming[0 : mnet.MaxBufferSize/2]
 			}
-
-			incoming = make([]byte, mnet.MinBufferSize)
 		}
 	}
 }
 
 func (n *UDPNetwork) handleCloseConnections(ctx context.Context) {
-	stand := mnet.Client{}
-
-	n.cu.RLock()
-	for _, client := range n.clients {
-		atomic.StoreInt64(&client.closedCounter, 1)
-		client.close(stand)
-	}
-	n.cu.RUnlock()
-
 	n.cu.Lock()
-	n.clients = make(map[string]*udpServerClient)
-	n.cu.Unlock()
+	defer n.cu.Unlock()
+
+	for _, client := range n.clients {
+		atomic.StoreInt64(&client.closed, 1)
+	}
+
+	n.clients = make(map[string]*targetConn)
 }
 
 // Statistics returns statics associated with UDPNetwork.

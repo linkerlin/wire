@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"strings"
@@ -25,21 +24,23 @@ var (
 	dialer = &net.Dialer{Timeout: 2 * time.Second}
 )
 
-func init() {
+func initLog() {
 	if testing.Verbose() {
 		events = metrics.New(custom.StackDisplay(os.Stderr))
 	}
 }
 
 func TestUDPServerWithNetConn(t *testing.T) {
+	initLog()
+
 	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createNewNetwork(ctx, "localhost:4050")
+	netw, err := createNewNetwork(ctx, "localhost:6050")
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully create network")
 	}
 	tests.Passed("Should have successfully create network")
 
-	conn, err := dialer.Dial("udp", "localhost:4050")
+	conn, err := dialer.Dial("udp", "localhost:6050")
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully connected to network")
 	}
@@ -78,14 +79,16 @@ func TestUDPServerWithNetConn(t *testing.T) {
 }
 
 func TestUDPServerWithMUDPClient(t *testing.T) {
+	initLog()
+
 	ctx, cancel := context.WithCancel(context.Background())
-	netw, err := createNewNetwork(ctx, "localhost:4050")
+	netw, err := createNewNetwork(ctx, "localhost:6050")
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully create network")
 	}
 	tests.Passed("Should have successfully create network")
 
-	client, err := mudp.Connect("localhost:4050", mudp.Metrics(events))
+	client, err := mudp.Connect("localhost:6050", mudp.Metrics(events))
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully connected to network")
 	}
@@ -173,6 +176,7 @@ func createNewNetwork(ctx context.Context, addr string) (*mudp.UDPNetwork, error
 			switch command {
 			case "pub":
 				res := []byte(fmt.Sprintf("now publishing to %+s\r\n", rest))
+				tests.Info("Writing response for 'pub' command")
 				w, err := client.Write(len(res))
 				if err != nil {
 					return err
@@ -182,6 +186,7 @@ func createNewNetwork(ctx context.Context, addr string) (*mudp.UDPNetwork, error
 				w.Close()
 			case "sub":
 				res := []byte(fmt.Sprintf("subscribed to %+s\r\n", rest))
+				tests.Info("Writing response for 'sub' command")
 				w, err := client.Write(len(res))
 				if err != nil {
 					return err
@@ -191,13 +196,10 @@ func createNewNetwork(ctx context.Context, addr string) (*mudp.UDPNetwork, error
 				w.Close()
 			}
 
-			if err := client.Flush(); err != nil {
-				if err == io.ErrShortWrite {
-					continue
-				}
+			tests.Info("UDP Server sent response for %q -> %+q", command, rest)
 
-				return err
-			}
+			err = client.Flush()
+			tests.Info("UDP Server flushed response for %q -> %+q : %+q", command, rest, err)
 		}
 	}
 

@@ -25,7 +25,7 @@ const (
 
 	// MaxBufferSize sets the maximum size allowed for all reads
 	// used in the readloop of a client's net.Conn.
-	MaxBufferSize = 69560
+	MaxBufferSize = 64 * 1024
 
 	// DefaultDialTimeout sets the default maximum time in seconds allowed before
 	// a net.Dialer exits attempt to dial a network.

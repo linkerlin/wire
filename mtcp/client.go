@@ -239,8 +239,8 @@ func (cn *clientNetwork) getStatistics(cm mnet.Client) (mnet.ClientStatistic, er
 	stats.MessagesRead = atomic.LoadInt64(&cn.MessageRead)
 	stats.BytesWritten = atomic.LoadInt64(&cn.totalWritten)
 	stats.BytesFlushed = atomic.LoadInt64(&cn.totalFlushed)
-	stats.MessagesWritten = atomic.LoadInt64(&cn.MessageWritten)
 	stats.Reconnects = atomic.LoadInt64(&cn.totalReconnects)
+	stats.MessagesWritten = atomic.LoadInt64(&cn.MessageWritten)
 	return stats, nil
 }
 

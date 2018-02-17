@@ -31,6 +31,10 @@ var (
 	ErrPendingReads        = errors.New("invalid read state: still pending data for last header remaining")
 )
 
+//*****************************************************************
+// LengthReader Implementation
+//*****************************************************************
+
 // LengthReader implements a custom byte reader which wraps a provided io.Reader
 // and attempts to read necessary incoming data where each data even if batched
 // together always has a `LENGHTOFData` attached to it's original
@@ -59,6 +63,13 @@ func NewLengthReader(r io.Reader, headerLen int) *LengthReader {
 		last:   mnet.MinBufferSize,
 		area:   make([]byte, headerLen),
 	}
+}
+
+// Reset resets the internal state of the receive reader and sets new provided
+// reader as target reader.
+func (lr *LengthReader) Reset(r io.Reader) {
+	lr.reset()
+	lr.r = r
 }
 
 // Read returns the next available bytes received from the underline reader
@@ -160,7 +171,7 @@ func (lr *LengthReader) reset() {
 }
 
 //*****************************************************************
-//
+// LengthRecvReader Implementation
 //*****************************************************************
 
 // LengthRecvReader implements a custom io.Reader which requires first extracting of
@@ -192,6 +203,13 @@ func NewLengthRecvReader(r io.Reader, headerLen int) *LengthRecvReader {
 		last:   mnet.MinBufferSize,
 		area:   make([]byte, headerLen),
 	}
+}
+
+// Reset resets the internal state of the receive reader and sets new provided
+// reader as target reader.
+func (lr *LengthRecvReader) Reset(r io.Reader) {
+	lr.reset()
+	lr.r = r
 }
 
 // Read expects that the provided byte slice will match the retrieved header size

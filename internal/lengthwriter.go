@@ -71,6 +71,27 @@ func NewLengthWriter(w io.Writer, size int, dataLength int) *LengthWriter {
 	}
 }
 
+// Reset resets io.Writer, size and data length to be used by writer for its operations.
+func (lw *LengthWriter) Reset(w io.Writer, size int, dataLength int) {
+	var area []byte
+
+	switch size {
+	case 2:
+		area = bit2Pool.Get().([]byte)
+	case 4:
+		area = bit4Pool.Get().([]byte)
+	case 8:
+		area = bit8Pool.Get().([]byte)
+	}
+
+	lw.n = 0
+	lw.w = w
+	lw.ty = size
+	lw.area = area
+	lw.max = dataLength
+	lw.buff = bytespool.Get(dataLength)
+}
+
 // Close closes this writer and flushes data into underline writer.
 func (lw *LengthWriter) Close() error {
 	if lw.n == 0 {
@@ -119,7 +140,8 @@ func (lw *LengthWriter) Close() error {
 		return err
 	}
 
-	bytespool.Put(lw.buff[0:cap(lw.buff)])
+	bcap := cap(lw.buff)
+	bytespool.Put(lw.buff[0:bcap])
 
 	lw.w = nil
 	lw.buff = nil
@@ -189,6 +211,27 @@ func NewActionLengthWriter(wx WriterAction, size int, dataLength int) *ActionLen
 	}
 }
 
+// Reset resets action function, size and data length to be used by writer for its operations.
+func (lw *ActionLengthWriter) Reset(wx WriterAction, size int, dataLength int) {
+	var area []byte
+
+	switch size {
+	case 2:
+		area = bit2Pool.Get().([]byte)
+	case 4:
+		area = bit4Pool.Get().([]byte)
+	case 8:
+		area = bit8Pool.Get().([]byte)
+	}
+
+	lw.n = 0
+	lw.wx = wx
+	lw.ty = size
+	lw.area = area
+	lw.max = dataLength
+	lw.buff = bytespool.Get(dataLength)
+}
+
 // Close closes this writer and flushes data into underline writer.
 func (lw *ActionLengthWriter) Close() error {
 	if lw.n == 0 {
@@ -218,7 +261,8 @@ func (lw *ActionLengthWriter) Close() error {
 
 	err := lw.wx(lw.area, lw.buff[0:lw.n])
 
-	bytespool.Put(lw.buff[0:cap(lw.buff)])
+	bcap := cap(lw.buff)
+	bytespool.Put(lw.buff[0:bcap])
 
 	switch lw.ty {
 	case 2:
