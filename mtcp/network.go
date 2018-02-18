@@ -985,6 +985,15 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 	}
 
 	if n.connectedToMeByAddr(addr) {
+		n.Metrics.Emit(
+			metrics.Error(mnet.ErrAlreadyServiced),
+			metrics.WithID(n.ID),
+			metrics.With("network", n.ID),
+			metrics.With("addr", n.Addr),
+			metrics.With("target", addr),
+			metrics.With("serverName", n.ServerName),
+			metrics.Message("TCPNetwork.AddCluster: cluster already exists"),
+		)
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -998,11 +1007,29 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 	}
 
 	if err != nil {
+		n.Metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(n.ID),
+			metrics.With("network", n.ID),
+			metrics.With("addr", n.Addr),
+			metrics.With("target", addr),
+			metrics.With("serverName", n.ServerName),
+			metrics.Message("TCPNetwork.AddCluster: unable to dial network"),
+		)
 		return err
 	}
 
 	if n.connectedToMeByAddr(conn.RemoteAddr().String()) {
 		conn.Close()
+		n.Metrics.Emit(
+			metrics.Error(mnet.ErrAlreadyServiced),
+			metrics.WithID(n.ID),
+			metrics.With("network", n.ID),
+			metrics.With("addr", n.Addr),
+			metrics.With("target", addr),
+			metrics.With("serverName", n.ServerName),
+			metrics.Message("TCPNetwork.AddCluster: cluster already exists"),
+		)
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -1010,7 +1037,42 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 		return n.AddCluster(addr)
 	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
 
-	return n.addClient(conn, policy, true)
+	n.Metrics.Emit(
+		metrics.WithID(n.ID),
+		metrics.With("network", n.ID),
+		metrics.With("addr", n.Addr),
+		metrics.With("target", addr),
+		metrics.With("serverName", n.ServerName),
+		metrics.Message("TCPNetwork.AddCluster: Cluster net.Conn acheived"),
+	)
+
+	if err := n.addClient(conn, policy, true); err != nil {
+		conn.Close()
+		n.Metrics.Send(metrics.Entry{
+			ID:      n.ID,
+			Level:   metrics.ErrorLvl,
+			Message: "Failed to add new connection",
+			Field: metrics.Field{
+				"err":         err,
+				"remote_addr": conn.RemoteAddr(),
+				"local_addr":  conn.LocalAddr(),
+			},
+		})
+		return err
+	}
+
+	n.Metrics.Send(metrics.Entry{
+		ID:      n.ID,
+		Level:   metrics.InfoLvl,
+		Message: "Added new cluster connection",
+		Field: metrics.Field{
+			"err":         err,
+			"remote_addr": conn.RemoteAddr(),
+			"local_addr":  conn.LocalAddr(),
+		},
+	})
+
+	return nil
 }
 
 // connectedToMeByAddr returns true/false if we are already connected to server.

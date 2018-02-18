@@ -1002,6 +1002,15 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 	}
 
 	if n.connectedToMeByAddr(addr) {
+		n.Metrics.Emit(
+			metrics.Error(mnet.ErrAlreadyServiced),
+			metrics.WithID(n.ID),
+			metrics.With("network", n.ID),
+			metrics.With("addr", n.Addr),
+			metrics.With("target", addr),
+			metrics.With("serverName", n.ServerName),
+			metrics.Message("WebsocketNetwork.AddCluster: cluster already exists"),
+		)
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -1015,11 +1024,31 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 
 	conn, _, hs, err := n.Dialer.Dial(context.Background(), addr)
 	if err != nil {
+		n.Metrics.Emit(
+			metrics.Error(err),
+			metrics.WithID(n.ID),
+			metrics.With("network", n.ID),
+			metrics.With("addr", n.Addr),
+			metrics.With("target", addr),
+			metrics.With("serverName", n.ServerName),
+			metrics.Message("WebsocketNetwork.AddCluster: unable to dial network"),
+		)
 		return err
 	}
 
 	if n.connectedToMeByAddr(conn.RemoteAddr().String()) {
 		conn.Close()
+		n.Metrics.Emit(
+			metrics.Error(mnet.ErrAlreadyServiced),
+			metrics.WithID(n.ID),
+			metrics.With("network", n.ID),
+			metrics.With("addr", n.Addr),
+			metrics.With("target", addr),
+			metrics.With("target-remote", conn.RemoteAddr()),
+			metrics.With("target-local", conn.RemoteAddr()),
+			metrics.With("serverName", n.ServerName),
+			metrics.Message("WebsocketNetwork.AddCluster: cluster already exists"),
+		)
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -1027,7 +1056,42 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		return n.AddCluster(addr)
 	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
 
-	return n.addWSClient(conn, hs, policy, true)
+	n.Metrics.Emit(
+		metrics.WithID(n.ID),
+		metrics.With("network", n.ID),
+		metrics.With("addr", n.Addr),
+		metrics.With("target", addr),
+		metrics.With("serverName", n.ServerName),
+		metrics.Message("WebsocketNetwork.AddCluster: Cluster net.Conn acheived"),
+	)
+
+	if err := n.addWSClient(conn, hs, policy, true); err != nil {
+		conn.Close()
+		n.Metrics.Send(metrics.Entry{
+			ID:      n.ID,
+			Level:   metrics.ErrorLvl,
+			Message: "Failed to add new connection",
+			Field: metrics.Field{
+				"err":         err,
+				"remote_addr": conn.RemoteAddr(),
+				"local_addr":  conn.LocalAddr(),
+			},
+		})
+		return err
+	}
+
+	n.Metrics.Send(metrics.Entry{
+		ID:      n.ID,
+		Level:   metrics.InfoLvl,
+		Message: "Added new cluster connection",
+		Field: metrics.Field{
+			"err":         err,
+			"remote_addr": conn.RemoteAddr(),
+			"local_addr":  conn.LocalAddr(),
+		},
+	})
+
+	return nil
 }
 
 // connectedToMeByAddr returns true/false if we are already connected to server.
@@ -1074,6 +1138,7 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, 
 	if err != nil {
 		n.Metrics.Send(metrics.Entry{
 			ID:      n.ID,
+			Level:   metrics.ErrorLvl,
 			Message: "Failed to upgrade connection",
 			Field: metrics.Field{
 				"err":         err,
@@ -1087,6 +1152,7 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, 
 
 	n.Metrics.Send(metrics.Entry{
 		ID:      n.ID,
+		Level:   metrics.InfoLvl,
 		Message: "Upgraded connection successfully",
 		Field: metrics.Field{
 			"handshake":   handshake,
@@ -1097,6 +1163,18 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, 
 
 	if err := n.addWSClient(newConn, handshake, policy, isCluster); err != nil {
 		newConn.Close()
+
+		n.Metrics.Send(metrics.Entry{
+			ID:      n.ID,
+			Level:   metrics.ErrorLvl,
+			Message: "Failed to add new connection",
+			Field: metrics.Field{
+				"err":         err,
+				"remote_addr": newConn.RemoteAddr(),
+				"local_addr":  newConn.LocalAddr(),
+			},
+		})
+
 		return err
 	}
 
@@ -1106,6 +1184,16 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, 
 func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mnet.RetryPolicy, isCluster bool) error {
 	atomic.AddInt64(&n.totalClients, 1)
 	atomic.AddInt64(&n.totalOpened, 1)
+
+	n.Metrics.Emit(
+		metrics.Message("WebsocketNetwork.addClient: adding new client"),
+		metrics.With("network", n.ID),
+		metrics.With("addr", n.Addr),
+		metrics.With("serverName", n.ServerName),
+		metrics.With("client_localAddr", conn.LocalAddr()),
+		metrics.With("client_remoteAddr", conn.RemoteAddr()),
+		metrics.WithID(n.ID),
+	)
 
 	var wsReader *wsutil.Reader
 	var wsWriter *wsutil.Writer
@@ -1135,16 +1223,6 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	client.localAddr = conn.LocalAddr()
 	client.remoteAddr = conn.RemoteAddr()
 	client.parser = new(internal.TaggedMessages)
-
-	defer n.Metrics.Emit(
-		metrics.Message("WebsocketNetwork.addClient: add new client"),
-		metrics.With("network", n.ID),
-		metrics.With("addr", n.Addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.With("client_id", client.id),
-		metrics.With("client_addr", conn.RemoteAddr()),
-		metrics.WithID(n.ID),
-	)
 
 	client.waiter.Add(1)
 	go client.readLoop(conn, wsReader)
