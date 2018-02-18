@@ -387,7 +387,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 					metrics.WithID(nc.id),
 					metrics.With("client", nc.id),
 					metrics.With("network", nc.nid),
-					metrics.Message("websocketServerClient.Handshake: HandShake failed"),
+					metrics.Message("tcpServerClient.Handshake: HandShake failed"),
 				)
 				return err
 			}
@@ -411,7 +411,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 			metrics.With("client", nc.id),
 			metrics.With("network", nc.nid),
 			metrics.With("message", string(msg)),
-			metrics.Message("websocketServerClient.Handshake: Message received"),
+			metrics.Message("tcpServerClient.Handshake: Message received"),
 		)
 
 		// if we get a rescue signal, then client never got our CINFO request, so resent.
@@ -420,7 +420,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				metrics.WithID(nc.id),
 				metrics.With("client", nc.id),
 				metrics.With("network", nc.nid),
-				metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
+				metrics.Message("tcpServerClient.Handshake: HandShake Rescue received"),
 			)
 			if err := nc.sendCINFOReq(cm); err != nil {
 				return err
@@ -479,7 +479,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				metrics.WithID(nc.id),
 				metrics.With("client", nc.id),
 				metrics.With("network", nc.nid),
-				metrics.Message("websocketServerClient.Handshake: HandShake send CLSTATUS failed"),
+				metrics.Message("tcpServerClient.Handshake: HandShake send CLSTATUS failed"),
 			)
 			return err
 		}
@@ -496,7 +496,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 						metrics.WithID(nc.id),
 						metrics.With("client", nc.id),
 						metrics.With("network", nc.nid),
-						metrics.Message("websocketServerClient.Handshake: HandShake failed"),
+						metrics.Message("tcpServerClient.Handshake: HandShake failed"),
 					)
 					return err
 				}
@@ -520,7 +520,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				metrics.With("client", nc.id),
 				metrics.With("network", nc.nid),
 				metrics.With("message", string(msg)),
-				metrics.Message("websocketServerClient.Handshake: Message received"),
+				metrics.Message("tcpServerClient.Handshake: Message received"),
 			)
 
 			// if we get a rescue signal, then client never got our CLStatus response, so resend.
@@ -529,7 +529,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 					metrics.WithID(nc.id),
 					metrics.With("client", nc.id),
 					metrics.With("network", nc.nid),
-					metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
+					metrics.Message("tcpServerClient.Handshake: HandShake Rescue received"),
 				)
 
 				if err := nc.handleCLStatusSend(cm); err != nil {
@@ -538,7 +538,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 						metrics.WithID(nc.id),
 						metrics.With("client", nc.id),
 						metrics.With("network", nc.nid),
-						metrics.Message("websocketServerClient.Handshake: HandShake Rescue send CLSTATUS failed"),
+						metrics.Message("tcpServerClient.Handshake: HandShake Rescue send CLSTATUS failed"),
 					)
 					return err
 				}
@@ -707,7 +707,7 @@ func (nc *tcpServerClient) readLoop(cm mnet.Client) {
 				metrics.Error(err),
 				metrics.WithID(nc.id),
 				metrics.With("frame", frame),
-				metrics.Message("Connection failed to read data frame"),
+				metrics.Message("Connection failed to read header frame"),
 				metrics.With("network", nc.nid),
 			)
 			return
@@ -984,6 +984,10 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 		return nil
 	}
 
+	if n.connectedToMeByAddr(addr) {
+		return mnet.ErrAlreadyServiced
+	}
+
 	var err error
 	var conn net.Conn
 
@@ -997,7 +1001,7 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 		return err
 	}
 
-	if n.connectedToMe(conn) {
+	if n.connectedToMeByAddr(conn.RemoteAddr().String()) {
 		conn.Close()
 		return mnet.ErrAlreadyServiced
 	}
@@ -1007,6 +1011,24 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
 
 	return n.addClient(conn, policy, true)
+}
+
+// connectedToMeByAddr returns true/false if we are already connected to server.
+func (n *TCPNetwork) connectedToMeByAddr(addr string) bool {
+	n.cu.Lock()
+	defer n.cu.Unlock()
+
+	for _, conn := range n.clients {
+		if conn.srcInfo == nil {
+			continue
+		}
+
+		if conn.srcInfo.ServerAddr == addr {
+			return true
+		}
+	}
+
+	return false
 }
 
 // connectedToMe returns true/false if we are already connected to server.

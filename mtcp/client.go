@@ -233,7 +233,7 @@ func (cn *clientNetwork) respondToINFO(cm mnet.Client, conn net.Conn, reader io.
 		metrics.With("network", cn.nid),
 		metrics.With("local-addr", cn.localAddr),
 		metrics.With("remote-addr", cn.remoteAddr),
-		metrics.Message("clientNetwork.Handshake: Sending CINFO response"),
+		metrics.Message("clientNetwork.respondToINFO: Sending CINFO response"),
 	)
 
 	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
@@ -512,7 +512,7 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 				metrics.Error(err),
 				metrics.WithID(cn.id),
 				metrics.With("frame", frame),
-				metrics.Message("Connection failed to read data frame"),
+				metrics.Message("clientNetwork.readLoop: Connection failed to read data frame"),
 				metrics.With("network", cn.nid),
 			)
 			return
@@ -528,7 +528,7 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 				metrics.With("read-length", n),
 				metrics.With("length", len(incoming[:n])),
 				metrics.With("data", string(incoming[:n])),
-				metrics.Message("Connection failed to read: closing"),
+				metrics.Message("clientNetwork.readLoop: Connection failed to read: closing"),
 				metrics.With("network", cn.nid),
 			)
 			return
@@ -541,7 +541,7 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
-				metrics.Message("ParseError"),
+				metrics.Message("clientNetwork.readLoop: ParseError"),
 				metrics.With("network", cn.nid),
 				metrics.With("length", len(incoming)),
 				metrics.With("data", string(incoming)),
@@ -665,11 +665,19 @@ func (cn *clientNetwork) getConn(_ mnet.Client, addr string) (net.Conn, error) {
 				metrics.With("addr", addr),
 				metrics.With("network", cn.nid),
 				metrics.With("type", "tcp"),
-				metrics.Message("Connection: failed to connect"),
+				metrics.Message("clientNetwork.getConn: Connection: failed to connect"),
 			)
 
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				if lastSleep >= mnet.MaxTemporarySleep {
+					cn.metrics.Emit(
+						metrics.Error(err),
+						metrics.WithID(cn.id),
+						metrics.With("addr", addr),
+						metrics.With("network", cn.nid),
+						metrics.With("type", "tcp"),
+						metrics.Message("clientNetwork.getConn: Connection: failed to connect, Timeout errors"),
+					)
 					return nil, err
 				}
 
@@ -684,6 +692,14 @@ func (cn *clientNetwork) getConn(_ mnet.Client, addr string) (net.Conn, error) {
 	if cn.secure && cn.tls != nil {
 		tlsConn := tls.Client(conn, cn.tls)
 		if err := tlsConn.Handshake(); err != nil {
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("addr", addr),
+				metrics.With("network", cn.nid),
+				metrics.With("type", "tcp"),
+				metrics.Message("clientNetwork.getConn: Connection: tls handshake failure"),
+			)
 			return nil, err
 		}
 
@@ -693,6 +709,14 @@ func (cn *clientNetwork) getConn(_ mnet.Client, addr string) (net.Conn, error) {
 	if cn.secure && cn.tls == nil {
 		tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
 		if err := tlsConn.Handshake(); err != nil {
+			cn.metrics.Emit(
+				metrics.Error(err),
+				metrics.WithID(cn.id),
+				metrics.With("addr", addr),
+				metrics.With("network", cn.nid),
+				metrics.With("type", "tcp"),
+				metrics.Message("clientNetwork.getConn: Connection: tls handshake failure"),
+			)
 			return nil, err
 		}
 

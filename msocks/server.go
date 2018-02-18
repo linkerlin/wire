@@ -1001,6 +1001,10 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		return nil
 	}
 
+	if n.connectedToMeByAddr(addr) {
+		return mnet.ErrAlreadyServiced
+	}
+
 	if !strings.HasPrefix(addr, "ws://") && !strings.HasPrefix(addr, "wss://") {
 		if n.TLS == nil {
 			addr = "ws://" + addr
@@ -1014,7 +1018,7 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		return err
 	}
 
-	if n.connectedToMe(conn) {
+	if n.connectedToMeByAddr(conn.RemoteAddr().String()) {
 		conn.Close()
 		return mnet.ErrAlreadyServiced
 	}
@@ -1024,6 +1028,24 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
 
 	return n.addWSClient(conn, hs, policy, true)
+}
+
+// connectedToMeByAddr returns true/false if we are already connected to server.
+func (n *WebsocketNetwork) connectedToMeByAddr(addr string) bool {
+	n.cu.Lock()
+	defer n.cu.Unlock()
+
+	for _, conn := range n.clients {
+		if conn.srcInfo == nil {
+			continue
+		}
+
+		if conn.srcInfo.ServerAddr == addr {
+			return true
+		}
+	}
+
+	return false
 }
 
 // connectedToMe returns true/false if we are already connected to server.

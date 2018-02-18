@@ -260,6 +260,13 @@ func (cn *socketClient) respondToINFO(cm mnet.Client, conn net.Conn, reader io.R
 		// if we failed and timed out, then send rescue message and re-await.
 		if sendRescueMsg {
 			if err := cn.sendRescue(cm); err != nil {
+				cn.metrics.Emit(
+					metrics.Error(err),
+					metrics.WithID(cn.id),
+					metrics.With("client", cn.id),
+					metrics.With("network", cn.nid),
+					metrics.Message("socketClient.respondToINFO: failed to receive CRESCUE req"),
+				)
 				return err
 			}
 
