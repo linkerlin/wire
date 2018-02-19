@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -626,8 +625,6 @@ func (sc *websocketServerClient) handshake() error {
 			}
 
 			if time.Now().Sub(before) > sc.maxInfoWait {
-				fmt.Printf("Killing handshake due to timeout\n")
-
 				sc.close()
 				sc.metrics.Emit(
 					metrics.Error(mnet.ErrFailedToRecieveInfo),

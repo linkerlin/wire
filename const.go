@@ -23,7 +23,7 @@ const (
 
 	// MaxInfoWait sets the default duration to wait for arrival of connection info else
 	// closing the connection.
-	MaxInfoWait = time.Second * 8
+	MaxInfoWait = time.Second * 10
 
 	// DefaultDialTimeout sets the default maximum time in seconds allowed before
 	// a net.Dialer exits attempt to dial a network.
