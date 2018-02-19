@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net"
 	"sync/atomic"
-	"time"
 
 	"sync"
 
@@ -50,8 +49,7 @@ type targetConn struct {
 	metrics  metrics.Metrics
 	parser   *internal.TaggedMessages
 
-	maxWrite    int
-	maxDeadline time.Duration
+	maxWrite int
 
 	totalRead     int64
 	totalWritten  int64
@@ -264,10 +262,6 @@ type UDPNetwork struct {
 	// udp listener will error out.
 	ReadBuffer int
 
-	// MaxWriterDeadline sets deadline to be enforced when writing
-	// to network.
-	MaxWriteDeadline time.Duration
-
 	totalClients int64
 	totalClosed  int64
 	totalActive  int64
@@ -325,10 +319,6 @@ func (n *UDPNetwork) Start(ctx context.Context) error {
 
 	if n.ID == "" {
 		n.ID = uuid.NewV4().String()
-	}
-
-	if n.MaxWriteDeadline <= 0 {
-		n.MaxWriteDeadline = mnet.MaxFlushDeadline
 	}
 
 	n.Addr = netutils.GetAddr(n.Addr)
@@ -438,7 +428,6 @@ func (n *UDPNetwork) addClient(addr net.Addr, conn *net.UDPConn) *targetConn {
 		client.laddr = conn.LocalAddr()
 		client.raddr = conn.RemoteAddr()
 		client.id = uuid.NewV4().String()
-		client.maxDeadline = n.MaxWriteDeadline
 		client.parser = new(internal.TaggedMessages)
 		client.br = internal.NewLengthRecvReader(nil, mnet.HeaderLength)
 		client.bw = bufio.NewWriterSize(proxyWriter{conn: conn, target: addr}, mnet.MaxBufferSize)

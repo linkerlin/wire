@@ -30,14 +30,6 @@ var (
 // changes to a *clientNetwork type
 type ConnectOptions func(conn *clientConn)
 
-// WriteInterval sets the clientNetwork to use the provided value
-// as its write intervals for colasced/batch writing of send data.
-func WriteInterval(dur time.Duration) ConnectOptions {
-	return func(cm *clientConn) {
-		cm.maxDeadline = dur
-	}
-}
-
 // Metrics sets the metrics instance to be used by the client for
 // logging.
 func Metrics(m metrics.Metrics) ConnectOptions {
@@ -113,10 +105,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.metrics = metrics.New()
 	}
 
-	if network.maxDeadline <= 0 {
-		network.maxDeadline = mnet.MaxFlushDeadline
-	}
-
 	if network.dialer == nil {
 		network.dialer = &net.Dialer{
 			Timeout:   network.dialTimeout,
@@ -154,8 +142,6 @@ type clientConn struct {
 	readBuffer int
 	started    int64
 	network    string
-
-	maxDeadline time.Duration
 
 	dialer      *net.Dialer
 	waiter      sync.WaitGroup
@@ -290,12 +276,9 @@ func (cn *clientConn) flush() error {
 	atomic.AddInt64(&cn.totalFlushed, int64(buffered))
 
 	if buffered > 0 {
-		//conn.SetWriteDeadline(time.Now().Add(cn.maxDeadline))
 		if err := cn.bw.Flush(); err != nil {
-			//conn.SetWriteDeadline(time.Time{})
 			return err
 		}
-		//conn.SetWriteDeadline(time.Time{})
 	}
 
 	return nil

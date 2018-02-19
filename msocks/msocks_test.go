@@ -220,7 +220,6 @@ func createNewNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwor
 	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
 	netw.Metrics = events
-	netw.MaxDeadline = 3 * time.Second
 
 	netw.Handler = func(client mnet.Client) error {
 		for {
@@ -281,7 +280,6 @@ func createInfoNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwo
 	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
 	netw.Metrics = events
-	netw.MaxDeadline = 1 * time.Second
 
 	netw.Handler = func(client mnet.Client) error {
 		for {

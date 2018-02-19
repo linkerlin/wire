@@ -51,8 +51,6 @@ type websocketServerClient struct {
 	remoteAddr     net.Addr
 	maxWrite       int
 	serverAddr     net.Addr
-	maxDeadline    time.Duration
-	maxInfoWait    time.Duration
 	wshandshake    ws.Handshake
 	network        *WebsocketNetwork
 	metrics        metrics.Metrics
@@ -130,7 +128,7 @@ func (sc *websocketServerClient) write(size int) (io.WriteCloser, error) {
 		toWrite += mnet.HeaderLength
 
 		if toWrite >= sc.maxWrite {
-			conn.SetWriteDeadline(time.Now().Add(sc.maxDeadline))
+			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 			if err := sc.wsWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
 				sc.metrics.Emit(
@@ -259,7 +257,7 @@ func (sc *websocketServerClient) flush() error {
 	}
 
 	if sc.wsWriter.Buffered() != 0 {
-		conn.SetWriteDeadline(time.Now().Add(sc.maxDeadline))
+		conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 		if err := sc.wsWriter.Flush(); err != nil {
 			conn.SetWriteDeadline(time.Time{})
 			sc.metrics.Emit(
@@ -624,7 +622,7 @@ func (sc *websocketServerClient) handshake() error {
 				return err
 			}
 
-			if time.Now().Sub(before) > sc.maxInfoWait {
+			if time.Now().Sub(before) > mnet.MaxInfoWait {
 				sc.close()
 				sc.metrics.Emit(
 					metrics.Error(mnet.ErrFailedToRecieveInfo),
@@ -733,7 +731,7 @@ func (sc *websocketServerClient) handshake() error {
 					return err
 				}
 
-				if time.Now().Sub(before) > sc.maxInfoWait {
+				if time.Now().Sub(before) > mnet.MaxInfoWait {
 					sc.close()
 					sc.metrics.Emit(
 						metrics.Error(mnet.ErrFailedToCompleteHandshake),
@@ -854,10 +852,6 @@ type WebsocketNetwork struct {
 	// giving network.
 	MaxConnections int
 
-	// MaxWriteDeadline defines max time before all clients collected writes
-	// must be written to the connection.
-	MaxDeadline time.Duration
-
 	// MaxInfoWait defines the max time a connection awaits the completion of a
 	// handshake phase.
 	MaxInfoWait time.Duration
@@ -948,16 +942,8 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 		n.ClusterRetryDelay = mnet.DefaultClusterRetryDelay
 	}
 
-	if n.MaxInfoWait <= 0 {
-		n.MaxInfoWait = mnet.MaxInfoWait
-	}
-
 	if n.MaxWriteSize <= 0 {
 		n.MaxWriteSize = mnet.MaxBufferSize
-	}
-
-	if n.MaxDeadline <= 0 {
-		n.MaxDeadline = mnet.MaxFlushDeadline
 	}
 
 	n.routines.Add(1)
@@ -1214,9 +1200,7 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	client.serverAddr = n.raddr
 	client.isACluster = isCluster
 	client.maxWrite = n.MaxWriteSize
-	client.maxInfoWait = n.MaxInfoWait
 	client.id = uuid.NewV4().String()
-	client.maxDeadline = n.MaxDeadline
 	client.localAddr = conn.LocalAddr()
 	client.remoteAddr = conn.RemoteAddr()
 	client.parser = new(internal.TaggedMessages)

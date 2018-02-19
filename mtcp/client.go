@@ -40,14 +40,6 @@ func SecureConnection() ConnectOptions {
 	}
 }
 
-// WriteInterval sets the clientNetwork to use the provided value
-// as its write intervals for coalesced/batch writing of send data.
-func WriteInterval(dur time.Duration) ConnectOptions {
-	return func(cm *clientNetwork) {
-		cm.clientMaxWriteDeadline = dur
-	}
-}
-
 // MaxBuffer sets the clientNetwork to use the provided value
 // as its maximum buffer size for it's writer.
 func MaxBuffer(buffer int) ConnectOptions {
@@ -128,10 +120,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.maxWrite = mnet.MaxBufferSize
 	}
 
-	if network.clientMaxWriteDeadline <= 0 {
-		network.clientMaxWriteDeadline = mnet.MaxFlushDeadline
-	}
-
 	if network.dialer == nil {
 		network.dialer = &net.Dialer{
 			Timeout:   network.dialTimeout,
@@ -174,8 +162,7 @@ type clientNetwork struct {
 	dialTimeout      time.Duration
 	keepAliveTimeout time.Duration
 
-	maxWrite               int
-	clientMaxWriteDeadline time.Duration
+	maxWrite int
 
 	parser *internal.TaggedMessages
 
@@ -394,7 +381,7 @@ func (cn *clientNetwork) flush() error {
 	available := cn.buffWriter.Buffered()
 	atomic.StoreInt64(&cn.totalFlushed, int64(available))
 
-	conn.SetWriteDeadline(time.Now().Add(cn.clientMaxWriteDeadline))
+	conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 	err := cn.buffWriter.Flush()
 	if err != nil {
 		conn.SetWriteDeadline(time.Time{})
@@ -447,7 +434,7 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 		toWrite += mnet.HeaderLength
 
 		if toWrite >= cn.maxWrite {
-			conn.SetWriteDeadline(time.Now().Add(cn.clientMaxWriteDeadline))
+			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 			if err := cn.buffWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
 				return err

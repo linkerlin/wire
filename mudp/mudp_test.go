@@ -150,7 +150,6 @@ func createNewNetwork(ctx context.Context, addr string) (*mudp.UDPNetwork, error
 	netw.Addr = addr
 	netw.UDPNetwork = "udp"
 	netw.Metrics = events
-	netw.MaxWriteDeadline = 3 * time.Second
 
 	netw.Handler = func(client mnet.Client) error {
 		for {

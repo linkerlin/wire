@@ -37,14 +37,6 @@ var (
 // changes to a *clientNetwork type
 type ConnectOptions func(conn *socketClient)
 
-// WriteInterval sets the clientNetwork to use the provided value
-// as its write intervals for colasced/batch writing of send data.
-func WriteInterval(dur time.Duration) ConnectOptions {
-	return func(cm *socketClient) {
-		cm.maxDeadline = dur
-	}
-}
-
 // MaxBuffer sets the clientNetwork to use the provided value
 // as its maximum buffer size for it's writer.
 func MaxBuffer(buffer int) ConnectOptions {
@@ -137,16 +129,8 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.metrics = metrics.New()
 	}
 
-	if network.maxInfoWait <= 0 {
-		network.maxInfoWait = mnet.MaxInfoWait
-	}
-
 	if network.maxWrite <= 0 {
 		network.maxWrite = mnet.MaxBufferSize
-	}
-
-	if network.maxDeadline <= 0 {
-		network.maxDeadline = mnet.MaxFlushDeadline
 	}
 
 	if network.dialer == nil {

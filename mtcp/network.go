@@ -50,9 +50,7 @@ type tcpServerClient struct {
 	worker     sync.WaitGroup
 	do         sync.Once
 
-	maxWrite    int
-	maxDeadline time.Duration
-	maxInfoWait time.Duration
+	maxWrite int
 
 	totalRead      int64
 	totalWritten   int64
@@ -122,7 +120,7 @@ func (nc *tcpServerClient) flush() error {
 	buffered := nc.buffWriter.Buffered()
 	atomic.AddInt64(&nc.totalFlushOut, int64(buffered))
 
-	conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
+	conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 	err := nc.buffWriter.Flush()
 	conn.SetWriteDeadline(time.Time{})
 
@@ -392,7 +390,7 @@ func (nc *tcpServerClient) handshake() error {
 				return err
 			}
 
-			if time.Now().Sub(before) > nc.maxInfoWait {
+			if time.Now().Sub(before) > mnet.MaxInfoWait {
 				nc.closeConn()
 				nc.metrics.Emit(
 					metrics.Error(mnet.ErrFailedToRecieveInfo),
@@ -501,7 +499,7 @@ func (nc *tcpServerClient) handshake() error {
 					return err
 				}
 
-				if time.Now().Sub(before) > nc.maxInfoWait {
+				if time.Now().Sub(before) > mnet.MaxInfoWait {
 					nc.closeConn()
 					nc.metrics.Emit(
 						metrics.Error(mnet.ErrFailedToCompleteHandshake),
@@ -613,7 +611,7 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 		toWrite += mnet.HeaderLength
 
 		if toWrite >= nc.maxWrite {
-			conn.SetWriteDeadline(time.Now().Add(nc.maxDeadline))
+			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 			if err := nc.buffWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
 				return err
@@ -793,13 +791,6 @@ type TCPNetwork struct {
 	// each retry of reconnecting to a cluster address.
 	ClusterRetryDelay time.Duration
 
-	// MaxInfoWait defines the maximum duration allowed for a
-	// waiting for MNET:CINFO response.
-	MaxInfoWait time.Duration
-
-	// MaxWriteDeadline defines max time before all clients collected writes must be written to the connection.
-	MaxWriteDeadline time.Duration
-
 	// MaxWriteSize sets given max size of buffer for client, each client writes collected
 	// till flush must not exceed else will not be buffered and will be written directly.
 	MaxWriteSize int
@@ -867,14 +858,6 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 
 	if n.ClusterRetryDelay <= 0 {
 		n.ClusterRetryDelay = mnet.DefaultClusterRetryDelay
-	}
-
-	if n.MaxInfoWait <= 0 {
-		n.MaxInfoWait = mnet.MaxInfoWait
-	}
-
-	if n.MaxWriteDeadline <= 0 {
-		n.MaxWriteDeadline = mnet.MaxFlushDeadline
 	}
 
 	n.routines.Add(2)
@@ -1146,12 +1129,10 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	nc.metrics = n.Metrics
 	nc.serverAddr = n.raddr
 	nc.isACluster = isCluster
-	nc.maxInfoWait = n.MaxInfoWait
 	nc.localAddr = conn.LocalAddr()
 	nc.remoteAddr = conn.RemoteAddr()
 	nc.maxWrite = n.MaxWriteSize
 	nc.sos = newGuardedBuffer(512)
-	nc.maxDeadline = n.MaxWriteDeadline
 	nc.parser = new(internal.TaggedMessages)
 	nc.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
 
