@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"net"
 	"testing"
-	"time"
 
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/mudp"
@@ -175,7 +174,6 @@ func createBenchmarkNetwork(ctx context.Context, addr string) (*mudp.UDPNetwork,
 	var netw mudp.UDPNetwork
 	netw.Addr = addr
 	netw.Metrics = events
-	netw.MaxWriteDeadline = 3 * time.Second
 	netw.Handler = func(client mnet.Client) error {
 		for {
 			if _, err := client.Read(); err != nil {

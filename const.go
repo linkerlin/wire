@@ -16,7 +16,7 @@ const (
 	MaxTemporarySleep = 1 * time.Second
 
 	// MaxFlushDeadline sets the maximum, allowed duration for flushing data
-	MaxFlushDeadline = 4 * time.Second
+	MaxFlushDeadline = 3 * time.Second
 
 	// MaxReadDeadline sets the maximum read deadline for reading from a net.Conn.
 	MaxReadDeadline = 5 * time.Second

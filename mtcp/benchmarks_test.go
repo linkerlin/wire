@@ -143,7 +143,6 @@ func createBenchmarkNetwork(ctx context.Context, addr string, config *tls.Config
 	netw.TLS = config
 	netw.Metrics = events
 	netw.MaxWriteSize = size
-	netw.MaxWriteDeadline = 1 * time.Second
 
 	netw.Handler = func(client mnet.Client) error {
 		// Flush all incoming data out
