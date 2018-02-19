@@ -1258,7 +1258,11 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 		n.cu.Unlock()
 
 		if n.Hook != nil {
-			n.Hook.NodeDisconnected(mclient)
+			if isCluster {
+				n.Hook.ClusterDisconnected(mclient)
+			} else {
+				n.Hook.NodeDisconnected(mclient)
+			}
 		}
 
 		if policy != nil {
@@ -1290,7 +1294,11 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	}(mclient, client.remoteAddr)
 
 	if n.Hook != nil {
-		n.Hook.NodeAdded(mclient)
+		if isCluster {
+			n.Hook.ClusterAdded(mclient)
+		} else {
+			n.Hook.NodeAdded(mclient)
+		}
 	}
 
 	return nil

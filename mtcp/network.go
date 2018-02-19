@@ -1180,7 +1180,11 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 		n.cu.Unlock()
 
 		if n.Hook != nil {
-			n.Hook.NodeDisconnected(client)
+			if isCluster {
+				n.Hook.ClusterDisconnected(client)
+			} else {
+				n.Hook.NodeDisconnected(client)
+			}
 		}
 
 		if policy != nil {
@@ -1199,7 +1203,11 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	}()
 
 	if n.Hook != nil {
-		n.Hook.NodeAdded(client)
+		if isCluster {
+			n.Hook.ClusterAdded(client)
+		} else {
+			n.Hook.NodeAdded(client)
+		}
 	}
 
 	return nil
