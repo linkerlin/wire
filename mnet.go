@@ -126,52 +126,12 @@ type Hook interface {
 }
 
 //*************************************************************************
-// Method Function types
+// Data Reader Function Type
 //*************************************************************************
 
 // ConnHandler defines a function which will process a incoming net.Conn,
 // else if error is returned then the net.Conn is closed.
 type ConnHandler func(Client) error
-
-// ReaderFunc defines a function which takes giving incoming Client and returns associated
-// data and error.
-type ReaderFunc func() ([]byte, error)
-
-// WriteFunc defines a function type which takes a client, the max size of data to be written
-// and returns a writer through which it receives data for only that specific size.
-type WriteFunc func(int) (io.WriteCloser, error)
-
-// WriteStreamFunc defines a function type which takes a client, a total size of data to written
-// and the max chunk size to split all data written to its writer. This allows us equally use
-// the writer returned to stream large data size whilst ensuring that we still transfer in small
-// sizes with minimal wait.
-type StreamFunc func(string, int, int) (io.WriteCloser, error)
-
-// SiblingsFunc defines a function which returns a list of sibling funcs.
-type SiblingsFunc func() ([]Client, error)
-
-// AddrFunc defines a function type which returns a net.Addr for a client.
-type AddrFunc func() (net.Addr, error)
-
-// ClientFunc defines a function type which receives a Client type and
-// returns a possible error.
-type ClientFunc func() error
-
-// InfoFunc defines a function type which returns a Info struct
-// for giving client.
-type InfoFunc func() Info
-
-// StateFunc defines a function type which receives a Client type and
-// returns a boolean value.
-type StateFunc func() bool
-
-// ReconnectionFunc defines a function type which receives a Client pointer type and
-// is responsible for the reconnection of the client client connection.
-type ReconnectionFunc func(string) error
-
-// StatisticsFunc defines a function type which returns a Statistics
-// structs related to the user.
-type StatisticsFunc func() (ClientStatistic, error)
 
 //*************************************************************************
 // Network and Client Stats
@@ -220,6 +180,50 @@ type Info struct {
 }
 
 //*************************************************************************
+// Method Function types
+//*************************************************************************
+
+// ReaderFunc defines a function which takes giving incoming Client and returns associated
+// data and error.
+type ReaderFunc func() ([]byte, error)
+
+// WriteFunc defines a function type which takes a client, the max size of data to be written
+// and returns a writer through which it receives data for only that specific size.
+type WriteFunc func(int) (io.WriteCloser, error)
+
+// WriteStreamFunc defines a function type which takes a client, a total size of data to written
+// and the max chunk size to split all data written to its writer. This allows us equally use
+// the writer returned to stream large data size whilst ensuring that we still transfer in small
+// sizes with minimal wait.
+type StreamFunc func(string, int, int) (io.WriteCloser, error)
+
+// SiblingsFunc defines a function which returns a list of sibling funcs.
+type SiblingsFunc func() ([]Client, error)
+
+// AddrFunc defines a function type which returns a net.Addr for a client.
+type AddrFunc func() (net.Addr, error)
+
+// ClientFunc defines a function type which receives a Client type and
+// returns a possible error.
+type ClientFunc func() error
+
+// InfoFunc defines a function type which returns a Info struct
+// for giving client.
+type InfoFunc func() Info
+
+// StateFunc defines a function type which receives a Client type and
+// returns a boolean value.
+type StateFunc func() bool
+
+// ReconnectionFunc defines a function type which receives a Client pointer type and
+// is responsible for the reconnection of the client client connection.
+type ReconnectionFunc func(string) error
+
+// StatisticsFunc defines a function type which returns a Statistics
+// structs related to the user.
+type StatisticsFunc func() (ClientStatistic, error)
+
+//*************************************************************************
 // mnet.Client Method and Implementation
 //*************************************************************************
 
@@ -227,7 +231,6 @@ type Info struct {
 type Client struct {
 	ID               string
 	NID              string
-	Metrics          metrics.Metrics
 	LocalAddrFunc    AddrFunc
 	RemoteAddrFunc   AddrFunc
 	ReaderFunc       ReaderFunc
@@ -240,6 +243,7 @@ type Client struct {
 	SiblingsFunc     SiblingsFunc
 	StatisticFunc    StatisticsFunc
 	ReconnectionFunc ReconnectionFunc
+	Metrics          metrics.Metrics
 }
 
 // Info returns associated info of giving client.
