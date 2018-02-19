@@ -140,7 +140,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.RemoteAddrFunc = network.remoteAddr
 	c.ReconnectionFunc = network.reconnect
 
-	if err := network.reconnect(c, addr); err != nil {
+	if err := network.reconnect(addr); err != nil {
 		return c, err
 	}
 
@@ -215,16 +215,16 @@ func (cn *clientConn) readIncoming(r io.Reader) error {
 	}
 }
 
-func (cn *clientConn) localAddr(cm mnet.Client) (net.Addr, error) {
+func (cn *clientConn) localAddr() (net.Addr, error) {
 	return cn.laddr, nil
 }
 
-func (cn *clientConn) remoteAddr(cm mnet.Client) (net.Addr, error) {
+func (cn *clientConn) remoteAddr() (net.Addr, error) {
 	return cn.raddr, nil
 }
 
-func (cn *clientConn) read(cm mnet.Client) ([]byte, error) {
-	if err := cn.isAlive(cm); err != nil {
+func (cn *clientConn) read() ([]byte, error) {
+	if err := cn.isAlive(); err != nil {
 		return nil, err
 	}
 
@@ -234,11 +234,11 @@ func (cn *clientConn) read(cm mnet.Client) ([]byte, error) {
 	return indata, err
 }
 
-func (cn *clientConn) noop(cm mnet.Client) error {
+func (cn *clientConn) noop() error {
 	return nil
 }
 
-func (cn *clientConn) stats(cm mnet.Client) (mnet.ClientStatistic, error) {
+func (cn *clientConn) stats() (mnet.ClientStatistic, error) {
 	var stats mnet.ClientStatistic
 	stats.ID = cn.id
 	stats.Local = cn.laddr
@@ -256,7 +256,7 @@ func (cn *clientConn) isStarted() bool {
 	return atomic.LoadInt64(&cn.started) == 1
 }
 
-func (cn *clientConn) isAlive(cm mnet.Client) error {
+func (cn *clientConn) isAlive() error {
 	if atomic.LoadInt64(&cn.closed) == 1 && cn.isStarted() {
 		return mnet.ErrAlreadyClosed
 	}
@@ -265,8 +265,8 @@ func (cn *clientConn) isAlive(cm mnet.Client) error {
 
 // write returns an appropriate io.WriteCloser with appropriate size
 // to contain data to be written to be connection.
-func (cn *clientConn) flush(cm mnet.Client) error {
-	if err := cn.isAlive(cm); err != nil {
+func (cn *clientConn) flush() error {
+	if err := cn.isAlive(); err != nil {
 		return err
 	}
 
@@ -341,8 +341,8 @@ func (cn *clientConn) writeAction(size []byte, data []byte) error {
 
 // write returns an appropriate io.WriteCloser with appropriate size
 // to contain data to be written to be connection.
-func (cn *clientConn) write(cm mnet.Client, size int) (io.WriteCloser, error) {
-	if err := cn.isAlive(cm); err != nil {
+func (cn *clientConn) write(size int) (io.WriteCloser, error) {
+	if err := cn.isAlive(); err != nil {
 		return nil, err
 	}
 
@@ -365,12 +365,12 @@ func (cn *clientConn) write(cm mnet.Client, size int) (io.WriteCloser, error) {
 	return newWriter, nil
 }
 
-func (cn *clientConn) close(jn mnet.Client) error {
-	if err := cn.isAlive(jn); err != nil {
+func (cn *clientConn) close() error {
+	if err := cn.isAlive(); err != nil {
 		return mnet.ErrAlreadyClosed
 	}
 
-	cn.flush(jn)
+	cn.flush()
 
 	cn.cu.Lock()
 	if cn.conn == nil {
@@ -398,8 +398,8 @@ func (cn *clientConn) close(jn mnet.Client) error {
 	return err
 }
 
-func (cn *clientConn) reconnect(jn mnet.Client, addr string) error {
-	if err := cn.isAlive(jn); err == nil && cn.isStarted() {
+func (cn *clientConn) reconnect(addr string) error {
+	if err := cn.isAlive(); err == nil && cn.isStarted() {
 		return nil
 	}
 
@@ -418,7 +418,7 @@ func (cn *clientConn) reconnect(jn mnet.Client, addr string) error {
 		cn.raddr = raddr
 	}
 
-	conn, err := cn.getConn(jn, cn.raddr)
+	conn, err := cn.getConn(cn.raddr)
 	if err != nil {
 		return err
 	}
@@ -435,12 +435,12 @@ func (cn *clientConn) reconnect(jn mnet.Client, addr string) error {
 	cn.bu.Unlock()
 
 	cn.waiter.Add(1)
-	go cn.readLoop(conn, jn)
+	go cn.readLoop(conn)
 	return nil
 }
 
-func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
-	defer cn.close(jn)
+func (cn *clientConn) readLoop(conn *net.UDPConn) {
+	defer cn.close()
 	defer cn.waiter.Done()
 
 	var tmpReader io.Reader
@@ -510,7 +510,7 @@ func (cn *clientConn) readLoop(conn *net.UDPConn, jn mnet.Client) {
 }
 
 // getConn returns net.Conn for giving addr.
-func (cn *clientConn) getConn(cm mnet.Client, addr net.Addr) (*net.UDPConn, error) {
+func (cn *clientConn) getConn(addr net.Addr) (*net.UDPConn, error) {
 	lastSleep := mnet.MinTemporarySleep
 
 	var err error

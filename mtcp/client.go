@@ -154,7 +154,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.ReconnectionFunc = network.reconnect
 	c.StatisticFunc = network.getStatistics
 
-	if err := network.reconnect(c, addr); err != nil {
+	if err := network.reconnect(addr); err != nil {
 		return c, err
 	}
 
@@ -198,13 +198,13 @@ type clientNetwork struct {
 	conn net.Conn
 }
 
-func (cn *clientNetwork) handleCINFO(cm mnet.Client) error {
-	jsn, err := json.Marshal(cn.getInfo(cm))
+func (cn *clientNetwork) handleCINFO() error {
+	jsn, err := json.Marshal(cn.getInfo())
 	if err != nil {
 		return err
 	}
 
-	wc, err := cn.write(cm, len(jsn)+len(rinfoBytes))
+	wc, err := cn.write(len(jsn) + len(rinfoBytes))
 	if err != nil {
 		return err
 	}
@@ -212,21 +212,21 @@ func (cn *clientNetwork) handleCINFO(cm mnet.Client) error {
 	wc.Write(rinfoBytes)
 	wc.Write(jsn)
 	wc.Close()
-	return cn.flush(cm)
+	return cn.flush()
 }
 
-func (cn *clientNetwork) sendRescue(cm mnet.Client) error {
-	wc, err := cn.write(cm, len(rescueBytes))
+func (cn *clientNetwork) sendRescue() error {
+	wc, err := cn.write(len(rescueBytes))
 	if err != nil {
 		return err
 	}
 
 	wc.Write(rescueBytes)
 	wc.Close()
-	return cn.flush(cm)
+	return cn.flush()
 }
 
-func (cn *clientNetwork) respondToINFO(cm mnet.Client, conn net.Conn, reader io.Reader) error {
+func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 	cn.metrics.Emit(
 		metrics.WithID(cn.id),
 		metrics.With("client", cn.id),
@@ -245,7 +245,7 @@ func (cn *clientNetwork) respondToINFO(cm mnet.Client, conn net.Conn, reader io.
 	for {
 		// if we failed and timed out, then send rescue message and re-await.
 		if sendRescueMsg {
-			if err := cn.sendRescue(cm); err != nil {
+			if err := cn.sendRescue(); err != nil {
 				return err
 			}
 
@@ -320,10 +320,10 @@ func (cn *clientNetwork) respondToINFO(cm mnet.Client, conn net.Conn, reader io.
 		metrics.Message("clientNetwork.respondToCINFO: Sending CINFO completed"),
 	)
 
-	return cn.handleCINFO(cm)
+	return cn.handleCINFO()
 }
 
-func (cn *clientNetwork) getInfo(cm mnet.Client) mnet.Info {
+func (cn *clientNetwork) getInfo() mnet.Info {
 	addr := cn.addr
 	if cn.remoteAddr != nil {
 		addr = cn.remoteAddr.String()
@@ -337,7 +337,7 @@ func (cn *clientNetwork) getInfo(cm mnet.Client) mnet.Info {
 	}
 }
 
-func (cn *clientNetwork) getStatistics(cm mnet.Client) (mnet.ClientStatistic, error) {
+func (cn *clientNetwork) getStatistics() (mnet.ClientStatistic, error) {
 	var stats mnet.ClientStatistic
 	stats.ID = cn.id
 	stats.Local = cn.localAddr
@@ -352,27 +352,27 @@ func (cn *clientNetwork) getStatistics(cm mnet.Client) (mnet.ClientStatistic, er
 }
 
 // isLive returns error if clientNetwork is not connected to remote network.
-func (cn *clientNetwork) isLive(cm mnet.Client) error {
+func (cn *clientNetwork) isLive() error {
 	if atomic.LoadInt64(&cn.closed) == 1 {
 		return mnet.ErrAlreadyClosed
 	}
 	return nil
 }
 
-func (cn *clientNetwork) getRemoteAddr(cm mnet.Client) (net.Addr, error) {
+func (cn *clientNetwork) getRemoteAddr() (net.Addr, error) {
 	cn.cu.RLock()
 	defer cn.cu.RUnlock()
 	return cn.remoteAddr, nil
 }
 
-func (cn *clientNetwork) getLocalAddr(cm mnet.Client) (net.Addr, error) {
+func (cn *clientNetwork) getLocalAddr() (net.Addr, error) {
 	cn.cu.RLock()
 	defer cn.cu.RUnlock()
 	return cn.localAddr, nil
 }
 
-func (cn *clientNetwork) flush(cm mnet.Client) error {
-	if err := cn.isLive(cm); err != nil {
+func (cn *clientNetwork) flush() error {
+	if err := cn.isLive(); err != nil {
 		return err
 	}
 
@@ -411,8 +411,8 @@ func (cn *clientNetwork) flush(cm mnet.Client) error {
 	return err
 }
 
-func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
-	if err := cn.isLive(cm); err != nil {
+func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
+	if err := cn.isLive(); err != nil {
 		return nil, err
 	}
 
@@ -467,8 +467,8 @@ func (cn *clientNetwork) write(cm mnet.Client, inSize int) (io.WriteCloser, erro
 	}, mnet.HeaderLength, inSize), nil
 }
 
-func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
-	if err := cn.isLive(cm); err != nil {
+func (cn *clientNetwork) read() ([]byte, error) {
+	if err := cn.isLive(); err != nil {
 		return nil, err
 	}
 
@@ -480,7 +480,7 @@ func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
 	}
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
-		if err := cn.handleCINFO(cm); err != nil {
+		if err := cn.handleCINFO(); err != nil {
 			cn.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(cn.id),
@@ -496,8 +496,8 @@ func (cn *clientNetwork) read(cm mnet.Client) ([]byte, error) {
 	return indata, nil
 }
 
-func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
-	defer cn.close(cm)
+func (cn *clientNetwork) readLoop(conn net.Conn) {
+	defer cn.close()
 	defer cn.worker.Done()
 
 	connReader := bufio.NewReaderSize(conn, cn.maxWrite)
@@ -551,8 +551,8 @@ func (cn *clientNetwork) readLoop(cm mnet.Client, conn net.Conn) {
 	}
 }
 
-func (cn *clientNetwork) close(cm mnet.Client) error {
-	if err := cn.isLive(cm); err != nil {
+func (cn *clientNetwork) close() error {
+	if err := cn.isLive(); err != nil {
 		cn.metrics.Emit(
 			metrics.Error(err),
 			metrics.WithID(cn.id),
@@ -568,7 +568,7 @@ func (cn *clientNetwork) close(cm mnet.Client) error {
 		metrics.Message("clientNetwork.close: Closing connection"),
 	)
 
-	cn.flush(cm)
+	cn.flush()
 
 	cn.cu.Lock()
 	if cn.conn == nil {
@@ -592,8 +592,8 @@ func (cn *clientNetwork) close(cm mnet.Client) error {
 	return nil
 }
 
-func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
-	if err := cn.isLive(cm); err != nil {
+func (cn *clientNetwork) reconnect(altAddr string) error {
+	if err := cn.isLive(); err != nil {
 		return err
 	}
 
@@ -609,11 +609,11 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	// If we get no connection, then attempt to dial original address and finally
 	// return error.
 	if altAddr != "" {
-		if conn, err = cn.getConn(cm, altAddr); err != nil {
-			conn, err = cn.getConn(cm, cn.addr)
+		if conn, err = cn.getConn(altAddr); err != nil {
+			conn, err = cn.getConn(cn.addr)
 		}
 	} else {
-		conn, err = cn.getConn(cm, cn.addr)
+		conn, err = cn.getConn(cn.addr)
 	}
 
 	// If failure was met, then return error and go-offline again.
@@ -639,18 +639,18 @@ func (cn *clientNetwork) reconnect(cm mnet.Client, altAddr string) error {
 	cn.cu.Unlock()
 
 	connReader := bufio.NewReaderSize(conn, mnet.MaxBufferSize)
-	if err := cn.respondToINFO(cm, conn, connReader); err != nil {
+	if err := cn.respondToINFO(conn, connReader); err != nil {
 		return err
 	}
 
 	cn.worker.Add(1)
-	go cn.readLoop(cm, conn)
+	go cn.readLoop(conn)
 
 	return nil
 }
 
 // getConn returns net.Conn for giving addr.
-func (cn *clientNetwork) getConn(_ mnet.Client, addr string) (net.Conn, error) {
+func (cn *clientNetwork) getConn(addr string) (net.Conn, error) {
 	lastSleep := mnet.MinTemporarySleep
 
 	var err error

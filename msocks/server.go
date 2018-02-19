@@ -70,19 +70,19 @@ type websocketServerClient struct {
 // isCluster returns true/false if a giving connection is actually
 // connected to another server i.e a server-to-server and not a
 // client-to-server connection.
-func (sc *websocketServerClient) isCluster(cm mnet.Client) bool {
+func (sc *websocketServerClient) isCluster() bool {
 	return sc.isACluster
 }
 
-func (sc *websocketServerClient) getRemoteAddr(_ mnet.Client) (net.Addr, error) {
+func (sc *websocketServerClient) getRemoteAddr() (net.Addr, error) {
 	return sc.remoteAddr, nil
 }
 
-func (sc *websocketServerClient) getLocalAddr(_ mnet.Client) (net.Addr, error) {
+func (sc *websocketServerClient) getLocalAddr() (net.Addr, error) {
 	return sc.localAddr, nil
 }
 
-func (sc *websocketServerClient) getStatistics(_ mnet.Client) (mnet.ClientStatistic, error) {
+func (sc *websocketServerClient) getStatistics() (mnet.ClientStatistic, error) {
 	var stats mnet.ClientStatistic
 	stats.ID = sc.id
 	stats.Local = sc.localAddr
@@ -95,8 +95,8 @@ func (sc *websocketServerClient) getStatistics(_ mnet.Client) (mnet.ClientStatis
 	return stats, nil
 }
 
-func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser, error) {
-	if err := sc.isAlive(mn); err != nil {
+func (sc *websocketServerClient) write(size int) (io.WriteCloser, error) {
+	if err := sc.isAlive(); err != nil {
 		return nil, err
 	}
 
@@ -157,15 +157,15 @@ func (sc *websocketServerClient) write(mn mnet.Client, size int) (io.WriteCloser
 	}, mnet.HeaderLength, size), nil
 }
 
-func (sc *websocketServerClient) isAlive(_ mnet.Client) error {
+func (sc *websocketServerClient) isAlive() error {
 	if atomic.LoadInt64(&sc.closedCounter) == 1 {
 		return mnet.ErrAlreadyClosed
 	}
 	return nil
 }
 
-func (sc *websocketServerClient) clientRead(mn mnet.Client) ([]byte, error) {
-	if err := sc.isAlive(mn); err != nil {
+func (sc *websocketServerClient) clientRead() ([]byte, error) {
+	if err := sc.isAlive(); err != nil {
 		return nil, err
 	}
 
@@ -181,7 +181,7 @@ func (sc *websocketServerClient) clientRead(mn mnet.Client) ([]byte, error) {
 	}
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
-		if err := sc.handleCINFO(mn); err != nil {
+		if err := sc.handleCINFO(); err != nil {
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -193,8 +193,8 @@ func (sc *websocketServerClient) clientRead(mn mnet.Client) ([]byte, error) {
 // read reads from incoming message handling necessary
 // handshake response and requests received over the wire,
 // while returning non-hanshake messages.
-func (sc *websocketServerClient) serverRead(cm mnet.Client) ([]byte, error) {
-	if cerr := sc.isAlive(cm); cerr != nil {
+func (sc *websocketServerClient) serverRead() ([]byte, error) {
+	if cerr := sc.isAlive(); cerr != nil {
 		return nil, cerr
 	}
 
@@ -208,7 +208,7 @@ func (sc *websocketServerClient) serverRead(cm mnet.Client) ([]byte, error) {
 	atomic.AddInt64(&sc.totalRead, int64(len(indata)))
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
-		if err := sc.handleCINFO(cm); err != nil {
+		if err := sc.handleCINFO(); err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
@@ -222,7 +222,7 @@ func (sc *websocketServerClient) serverRead(cm mnet.Client) ([]byte, error) {
 	}
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
-		if err := sc.handleCLStatusReceive(cm, indata); err != nil {
+		if err := sc.handleCLStatusReceive(indata); err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
@@ -238,8 +238,8 @@ func (sc *websocketServerClient) serverRead(cm mnet.Client) ([]byte, error) {
 	return indata, nil
 }
 
-func (sc *websocketServerClient) flush(mn mnet.Client) error {
-	if err := sc.isAlive(mn); err != nil {
+func (sc *websocketServerClient) flush() error {
+	if err := sc.isAlive(); err != nil {
 		return err
 	}
 
@@ -277,8 +277,8 @@ func (sc *websocketServerClient) flush(mn mnet.Client) error {
 	return nil
 }
 
-func (sc *websocketServerClient) close(mn mnet.Client) error {
-	if err := sc.isAlive(mn); err != nil {
+func (sc *websocketServerClient) close() error {
+	if err := sc.isAlive(); err != nil {
 		sc.metrics.Emit(
 			metrics.Error(err),
 			metrics.WithID(sc.id),
@@ -298,7 +298,7 @@ func (sc *websocketServerClient) close(mn mnet.Client) error {
 
 	atomic.StoreInt64(&sc.closedCounter, 1)
 
-	sc.flush(mn)
+	sc.flush()
 
 	var err error
 	sc.cu.Lock()
@@ -334,7 +334,7 @@ func (sc *websocketServerClient) close(mn mnet.Client) error {
 // readLoop handles the necessary operation of reading data from the
 // underline connection.
 func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) {
-	defer sc.close(mnet.Client{})
+	defer sc.close()
 	defer sc.waiter.Done()
 
 	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
@@ -410,9 +410,9 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	}
 }
 
-func (sc *websocketServerClient) getInfo(cm mnet.Client) mnet.Info {
+func (sc *websocketServerClient) getInfo() mnet.Info {
 	var base mnet.Info
-	if sc.isCluster(cm) && sc.srcInfo != nil {
+	if sc.isCluster() && sc.srcInfo != nil {
 		base = *sc.srcInfo
 	} else {
 		base = mnet.Info{
@@ -426,7 +426,7 @@ func (sc *websocketServerClient) getInfo(cm mnet.Client) mnet.Info {
 		}
 	}
 
-	if others, err := sc.network.getAllClient(cm); err != nil {
+	if others, err := sc.network.getAllClient(sc.id); err != nil {
 		for _, other := range others {
 			if !other.IsCluster() {
 				continue
@@ -438,7 +438,7 @@ func (sc *websocketServerClient) getInfo(cm mnet.Client) mnet.Info {
 	return base
 }
 
-func (sc *websocketServerClient) handleCLStatusReceive(cm mnet.Client, data []byte) error {
+func (sc *websocketServerClient) handleCLStatusReceive(data []byte) error {
 	data = bytes.TrimPrefix(data, clStatusBytes)
 
 	var info mnet.Info
@@ -449,27 +449,27 @@ func (sc *websocketServerClient) handleCLStatusReceive(cm mnet.Client, data []by
 	sc.srcInfo = &info
 	sc.network.registerCluster(info.ClusterNodes)
 
-	wc, err := sc.write(cm, len(handshakeCompletedBytes))
+	wc, err := sc.write(len(handshakeCompletedBytes))
 	if err != nil {
 		return err
 	}
 
 	wc.Write(handshakeCompletedBytes)
 	wc.Close()
-	return sc.flush(cm)
+	return sc.flush()
 }
 
-func (sc *websocketServerClient) handleCLStatusSend(cm mnet.Client) error {
+func (sc *websocketServerClient) handleCLStatusSend() error {
 	var info mnet.Info
 	info.ID = sc.nid
 	info.Cluster = true
 	info.ServerNode = true
 	info.Meta = sc.network.Meta
-	info.MinBuffer = mnet.MinBufferSize
 	info.MaxBuffer = int64(sc.maxWrite)
+	info.MinBuffer = mnet.MinBufferSize
 	info.ServerAddr = sc.serverAddr.String()
 
-	if others, err := sc.network.getAllClient(cm); err != nil {
+	if others, err := sc.network.getAllClient(sc.id); err != nil {
 		for _, other := range others {
 			if !other.IsCluster() {
 				continue
@@ -483,7 +483,7 @@ func (sc *websocketServerClient) handleCLStatusSend(cm mnet.Client) error {
 		return err
 	}
 
-	wc, err := sc.write(cm, len(jsn)+len(clStatusBytes))
+	wc, err := sc.write(len(jsn) + len(clStatusBytes))
 	if err != nil {
 		return err
 	}
@@ -491,16 +491,16 @@ func (sc *websocketServerClient) handleCLStatusSend(cm mnet.Client) error {
 	wc.Write(clStatusBytes)
 	wc.Write(jsn)
 	wc.Close()
-	return sc.flush(cm)
+	return sc.flush()
 }
 
-func (sc *websocketServerClient) handleCINFO(cm mnet.Client) error {
-	jsn, err := json.Marshal(sc.getInfo(cm))
+func (sc *websocketServerClient) handleCINFO() error {
+	jsn, err := json.Marshal(sc.getInfo())
 	if err != nil {
 		return err
 	}
 
-	wc, err := sc.write(cm, len(jsn)+len(rinfoBytes))
+	wc, err := sc.write(len(jsn) + len(rinfoBytes))
 	if err != nil {
 		return err
 	}
@@ -508,7 +508,7 @@ func (sc *websocketServerClient) handleCINFO(cm mnet.Client) error {
 	wc.Write(rinfoBytes)
 	wc.Write(jsn)
 	wc.Close()
-	return sc.flush(cm)
+	return sc.flush()
 }
 
 func (sc *websocketServerClient) handleRINFO(data []byte) error {
@@ -526,9 +526,9 @@ func (sc *websocketServerClient) handleRINFO(data []byte) error {
 	return nil
 }
 
-func (sc *websocketServerClient) sendCINFOReq(cm mnet.Client) error {
+func (sc *websocketServerClient) sendCINFOReq() error {
 	// Send to new client mnet.CINFO request
-	wc, err := sc.write(cm, len(cinfoBytes))
+	wc, err := sc.write(len(cinfoBytes))
 	if err != nil {
 		sc.metrics.Emit(
 			metrics.Error(err),
@@ -562,7 +562,7 @@ func (sc *websocketServerClient) sendCINFOReq(cm mnet.Client) error {
 		return err
 	}
 
-	if err := sc.flush(cm); err != nil {
+	if err := sc.flush(); err != nil {
 		sc.metrics.Emit(
 			metrics.Error(err),
 			metrics.WithID(sc.id),
@@ -583,7 +583,7 @@ func (sc *websocketServerClient) sendCINFOReq(cm mnet.Client) error {
 	return nil
 }
 
-func (sc *websocketServerClient) handshake(cm mnet.Client) error {
+func (sc *websocketServerClient) handshake() error {
 	sc.metrics.Emit(
 		metrics.WithID(sc.id),
 		metrics.With("client", sc.id),
@@ -594,7 +594,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 		metrics.Message("websocketServerClient.Handshake"),
 	)
 
-	if err := sc.sendCINFOReq(cm); err != nil {
+	if err := sc.sendCINFOReq(); err != nil {
 		return err
 	}
 
@@ -612,7 +612,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 
 	// Wait for RCINFO response from connection.
 	for {
-		msg, err := sc.serverRead(cm)
+		msg, err := sc.serverRead()
 		if err != nil {
 			if err != mnet.ErrNoDataYet {
 				sc.metrics.Emit(
@@ -628,7 +628,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 			if time.Now().Sub(before) > sc.maxInfoWait {
 				fmt.Printf("Killing handshake due to timeout\n")
 
-				sc.close(cm)
+				sc.close()
 				sc.metrics.Emit(
 					metrics.Error(mnet.ErrFailedToRecieveInfo),
 					metrics.WithID(sc.id),
@@ -658,7 +658,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 				metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
 			)
 
-			if err := sc.sendCINFOReq(cm); err != nil {
+			if err := sc.sendCINFOReq(); err != nil {
 				return err
 			}
 
@@ -669,7 +669,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 
 		// First message should be a mnet.RCINFO response.
 		if !bytes.HasPrefix(msg, rinfoBytes) {
-			sc.close(cm)
+			sc.close()
 			sc.metrics.Emit(
 				metrics.Error(mnet.ErrFailedToRecieveInfo),
 				metrics.WithID(sc.id),
@@ -708,7 +708,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 
 	// if its a cluster send Cluster Status message.
 	if sc.isACluster {
-		if err := sc.handleCLStatusSend(cm); err != nil {
+		if err := sc.handleCLStatusSend(); err != nil {
 			sc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(sc.id),
@@ -723,7 +723,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 
 		// Wait for handshake completion signal.
 		for {
-			msg, err := sc.serverRead(cm)
+			msg, err := sc.serverRead()
 			if err != nil {
 				if err != mnet.ErrNoDataYet {
 					sc.metrics.Emit(
@@ -737,7 +737,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 				}
 
 				if time.Now().Sub(before) > sc.maxInfoWait {
-					sc.close(cm)
+					sc.close()
 					sc.metrics.Emit(
 						metrics.Error(mnet.ErrFailedToCompleteHandshake),
 						metrics.WithID(sc.id),
@@ -767,7 +767,7 @@ func (sc *websocketServerClient) handshake(cm mnet.Client) error {
 					metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
 				)
 
-				if err := sc.handleCLStatusSend(cm); err != nil {
+				if err := sc.handleCLStatusSend(); err != nil {
 					sc.metrics.Emit(
 						metrics.Error(err),
 						metrics.WithID(sc.id),
@@ -1237,14 +1237,17 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	mclient.LiveFunc = client.isAlive
 	mclient.LiveFunc = client.isAlive
 	mclient.InfoFunc = client.getInfo
-	mclient.SiblingsFunc = n.getAllClient
 	mclient.ReaderFunc = client.serverRead
 	mclient.LocalAddrFunc = client.getLocalAddr
 	mclient.StatisticFunc = client.getStatistics
 	mclient.RemoteAddrFunc = client.getRemoteAddr
 
+	mclient.SiblingsFunc = func() ([]mnet.Client, error) {
+		return n.getAllClient(client.id)
+	}
+
 	// Initial handshake protocol.
-	if err := client.handshake(mclient); err != nil {
+	if err := client.handshake(); err != nil {
 		return err
 	}
 
@@ -1312,13 +1315,13 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	return nil
 }
 
-func (n *WebsocketNetwork) getAllClient(from mnet.Client) ([]mnet.Client, error) {
+func (n *WebsocketNetwork) getAllClient(cid string) ([]mnet.Client, error) {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
 	var clients []mnet.Client
 	for _, conn := range n.clients {
-		if conn.id == from.ID {
+		if conn.id == cid {
 			continue
 		}
 
@@ -1333,7 +1336,10 @@ func (n *WebsocketNetwork) getAllClient(from mnet.Client) ([]mnet.Client, error)
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr
-		client.SiblingsFunc = n.getAllClient
+		client.SiblingsFunc = func() ([]mnet.Client, error) {
+			return n.getAllClient(conn.id)
+		}
+
 		clients = append(clients, client)
 	}
 
@@ -1400,7 +1406,7 @@ func (n *WebsocketNetwork) closeClientConnections(ctx context.Context) {
 	n.cu.RLock()
 	defer n.cu.RUnlock()
 	for _, conn := range n.clients {
-		conn.close(mnet.Client{})
+		conn.close()
 	}
 }
 

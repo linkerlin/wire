@@ -74,19 +74,19 @@ type tcpServerClient struct {
 // isCluster returns true/false if a giving connection is actually
 // connected to another server i.e a server-to-server and not a
 // client-to-server connection.
-func (nc *tcpServerClient) isCluster(cm mnet.Client) bool {
+func (nc *tcpServerClient) isCluster() bool {
 	return nc.isACluster
 }
 
 // isLive returns an error if networkconn is disconnected from network.
-func (nc *tcpServerClient) isLive(cm mnet.Client) error {
+func (nc *tcpServerClient) isLive() error {
 	if atomic.LoadInt64(&nc.closed) == 1 {
 		return mnet.ErrAlreadyClosed
 	}
 	return nil
 }
 
-func (nc *tcpServerClient) getStatistics(cm mnet.Client) (mnet.ClientStatistic, error) {
+func (nc *tcpServerClient) getStatistics() (mnet.ClientStatistic, error) {
 	var stats mnet.ClientStatistic
 	stats.ID = nc.id
 	stats.Local = nc.localAddr
@@ -99,8 +99,8 @@ func (nc *tcpServerClient) getStatistics(cm mnet.Client) (mnet.ClientStatistic, 
 	return stats, nil
 }
 
-func (nc *tcpServerClient) flush(cm mnet.Client) error {
-	if err := nc.isLive(cm); err != nil {
+func (nc *tcpServerClient) flush() error {
+	if err := nc.isLive(); err != nil {
 		return err
 	}
 
@@ -132,8 +132,8 @@ func (nc *tcpServerClient) flush(cm mnet.Client) error {
 // read reads from incoming message handling necessary
 // handshake response and requests received over the wire,
 // while returning non-hanshake messages.
-func (nc *tcpServerClient) read(cm mnet.Client) ([]byte, error) {
-	if cerr := nc.isLive(cm); cerr != nil {
+func (nc *tcpServerClient) read() ([]byte, error) {
+	if cerr := nc.isLive(); cerr != nil {
 		return nil, cerr
 	}
 
@@ -147,7 +147,7 @@ func (nc *tcpServerClient) read(cm mnet.Client) ([]byte, error) {
 	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
-		if err := nc.handleCINFO(cm); err != nil {
+		if err := nc.handleCINFO(); err != nil {
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
@@ -161,7 +161,7 @@ func (nc *tcpServerClient) read(cm mnet.Client) ([]byte, error) {
 	}
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
-		if err := nc.handleCLStatusReceive(cm, indata); err != nil {
+		if err := nc.handleCLStatusReceive(indata); err != nil {
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
@@ -177,9 +177,9 @@ func (nc *tcpServerClient) read(cm mnet.Client) ([]byte, error) {
 	return indata, nil
 }
 
-func (nc *tcpServerClient) getInfo(cm mnet.Client) mnet.Info {
+func (nc *tcpServerClient) getInfo() mnet.Info {
 	var base mnet.Info
-	if nc.isCluster(cm) && nc.srcInfo != nil {
+	if nc.isCluster() && nc.srcInfo != nil {
 		base = *nc.srcInfo
 	} else {
 		base = mnet.Info{
@@ -193,7 +193,7 @@ func (nc *tcpServerClient) getInfo(cm mnet.Client) mnet.Info {
 		}
 	}
 
-	if others, err := nc.network.getOtherClients(cm); err != nil {
+	if others, err := nc.network.getOtherClients(nc.id); err != nil {
 		for _, other := range others {
 			if !other.IsCluster() {
 				continue
@@ -205,7 +205,7 @@ func (nc *tcpServerClient) getInfo(cm mnet.Client) mnet.Info {
 	return base
 }
 
-func (nc *tcpServerClient) handleCLStatusReceive(cm mnet.Client, data []byte) error {
+func (nc *tcpServerClient) handleCLStatusReceive(data []byte) error {
 	data = bytes.TrimPrefix(data, clStatusBytes)
 
 	var info mnet.Info
@@ -216,17 +216,17 @@ func (nc *tcpServerClient) handleCLStatusReceive(cm mnet.Client, data []byte) er
 	nc.srcInfo = &info
 	nc.network.registerCluster(info.ClusterNodes)
 
-	wc, err := nc.write(cm, len(handshakeCompletedBytes))
+	wc, err := nc.write(len(handshakeCompletedBytes))
 	if err != nil {
 		return err
 	}
 
 	wc.Write(handshakeCompletedBytes)
 	wc.Close()
-	return nc.flush(cm)
+	return nc.flush()
 }
 
-func (nc *tcpServerClient) handleCLStatusSend(cm mnet.Client) error {
+func (nc *tcpServerClient) handleCLStatusSend() error {
 	var info mnet.Info
 	info.Cluster = true
 	info.ServerNode = true
@@ -236,7 +236,7 @@ func (nc *tcpServerClient) handleCLStatusSend(cm mnet.Client) error {
 	info.MinBuffer = mnet.MinBufferSize
 	info.ServerAddr = nc.network.raddr.String()
 
-	if others, err := nc.network.getOtherClients(cm); err != nil {
+	if others, err := nc.network.getOtherClients(nc.id); err != nil {
 		for _, other := range others {
 			if !other.IsCluster() {
 				continue
@@ -250,7 +250,7 @@ func (nc *tcpServerClient) handleCLStatusSend(cm mnet.Client) error {
 		return err
 	}
 
-	wc, err := nc.write(cm, len(jsn)+len(clStatusBytes))
+	wc, err := nc.write(len(jsn) + len(clStatusBytes))
 	if err != nil {
 		return err
 	}
@@ -258,16 +258,16 @@ func (nc *tcpServerClient) handleCLStatusSend(cm mnet.Client) error {
 	wc.Write(clStatusBytes)
 	wc.Write(jsn)
 	wc.Close()
-	return nc.flush(cm)
+	return nc.flush()
 }
 
-func (nc *tcpServerClient) handleCINFO(cm mnet.Client) error {
-	jsn, err := json.Marshal(nc.getInfo(cm))
+func (nc *tcpServerClient) handleCINFO() error {
+	jsn, err := json.Marshal(nc.getInfo())
 	if err != nil {
 		return err
 	}
 
-	wc, err := nc.write(cm, len(jsn)+len(rinfoBytes))
+	wc, err := nc.write(len(jsn) + len(rinfoBytes))
 	if err != nil {
 		return err
 	}
@@ -275,7 +275,7 @@ func (nc *tcpServerClient) handleCINFO(cm mnet.Client) error {
 	wc.Write(rinfoBytes)
 	wc.Write(jsn)
 	wc.Close()
-	return nc.flush(cm)
+	return nc.flush()
 }
 
 func (nc *tcpServerClient) handleRINFO(data []byte) error {
@@ -293,9 +293,9 @@ func (nc *tcpServerClient) handleRINFO(data []byte) error {
 	return nil
 }
 
-func (nc *tcpServerClient) sendCINFOReq(cm mnet.Client) error {
+func (nc *tcpServerClient) sendCINFOReq() error {
 	// Send to new client mnet.CINFO request
-	wc, err := nc.write(cm, len(cinfoBytes))
+	wc, err := nc.write(len(cinfoBytes))
 	if err != nil {
 		nc.metrics.Emit(
 			metrics.Error(err),
@@ -329,7 +329,7 @@ func (nc *tcpServerClient) sendCINFOReq(cm mnet.Client) error {
 		return err
 	}
 
-	if err := nc.flush(cm); err != nil {
+	if err := nc.flush(); err != nil {
 		nc.metrics.Emit(
 			metrics.Error(err),
 			metrics.WithID(nc.id),
@@ -349,7 +349,7 @@ func (nc *tcpServerClient) sendCINFOReq(cm mnet.Client) error {
 	return nil
 }
 
-func (nc *tcpServerClient) handshake(cm mnet.Client) error {
+func (nc *tcpServerClient) handshake() error {
 	// Send to new client mnet.CINFO request
 	nc.metrics.Emit(
 		metrics.WithID(nc.id),
@@ -361,7 +361,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 		metrics.Message("tcpServerClient.Handshake"),
 	)
 
-	if err := nc.sendCINFOReq(cm); err != nil {
+	if err := nc.sendCINFOReq(); err != nil {
 		return err
 	}
 
@@ -379,7 +379,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 	// Wait for RCINFO response from connection.
 	for {
-		msg, err := nc.read(cm)
+		msg, err := nc.read()
 		if err != nil {
 			if err != mnet.ErrNoDataYet {
 				nc.metrics.Emit(
@@ -393,7 +393,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 			}
 
 			if time.Now().Sub(before) > nc.maxInfoWait {
-				nc.closeConn(cm)
+				nc.closeConn()
 				nc.metrics.Emit(
 					metrics.Error(mnet.ErrFailedToRecieveInfo),
 					metrics.WithID(nc.id),
@@ -422,7 +422,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				metrics.With("network", nc.nid),
 				metrics.Message("tcpServerClient.Handshake: HandShake Rescue received"),
 			)
-			if err := nc.sendCINFOReq(cm); err != nil {
+			if err := nc.sendCINFOReq(); err != nil {
 				return err
 			}
 
@@ -433,7 +433,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 		// First message should be a mnet.RCINFO response.
 		if !bytes.HasPrefix(msg, rinfoBytes) {
-			nc.closeConn(cm)
+			nc.closeConn()
 			nc.metrics.Emit(
 				metrics.Error(mnet.ErrFailedToRecieveInfo),
 				metrics.WithID(nc.id),
@@ -473,7 +473,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 	// if its a cluster send Cluster Status message.
 	if nc.isACluster {
 
-		if err := nc.handleCLStatusSend(cm); err != nil {
+		if err := nc.handleCLStatusSend(); err != nil {
 			nc.metrics.Emit(
 				metrics.Error(err),
 				metrics.WithID(nc.id),
@@ -488,7 +488,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 
 		// Wait for handshake completion signal.
 		for {
-			msg, err := nc.read(cm)
+			msg, err := nc.read()
 			if err != nil {
 				if err != mnet.ErrNoDataYet {
 					nc.metrics.Emit(
@@ -502,7 +502,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 				}
 
 				if time.Now().Sub(before) > nc.maxInfoWait {
-					nc.closeConn(cm)
+					nc.closeConn()
 					nc.metrics.Emit(
 						metrics.Error(mnet.ErrFailedToCompleteHandshake),
 						metrics.WithID(nc.id),
@@ -532,7 +532,7 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 					metrics.Message("tcpServerClient.Handshake: HandShake Rescue received"),
 				)
 
-				if err := nc.handleCLStatusSend(cm); err != nil {
+				if err := nc.handleCLStatusSend(); err != nil {
 					nc.metrics.Emit(
 						metrics.Error(err),
 						metrics.WithID(nc.id),
@@ -577,8 +577,8 @@ func (nc *tcpServerClient) handshake(cm mnet.Client) error {
 	return nil
 }
 
-func (nc *tcpServerClient) write(cm mnet.Client, inSize int) (io.WriteCloser, error) {
-	if err := nc.isLive(cm); err != nil {
+func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
+	if err := nc.isLive(); err != nil {
 		return nil, err
 	}
 
@@ -633,8 +633,8 @@ func (nc *tcpServerClient) write(cm mnet.Client, inSize int) (io.WriteCloser, er
 	}, mnet.HeaderLength, inSize), nil
 }
 
-func (nc *tcpServerClient) closeConnection(cm mnet.Client) error {
-	if err := nc.isLive(cm); err != nil {
+func (nc *tcpServerClient) closeConnection() error {
+	if err := nc.isLive(); err != nil {
 		return err
 	}
 
@@ -646,7 +646,7 @@ func (nc *tcpServerClient) closeConnection(cm mnet.Client) error {
 
 	atomic.StoreInt64(&nc.closed, 1)
 
-	nc.flush(cm)
+	nc.flush()
 
 	nc.mu.Lock()
 	if nc.conn == nil {
@@ -668,22 +668,22 @@ func (nc *tcpServerClient) closeConnection(cm mnet.Client) error {
 	return err
 }
 
-func (nc *tcpServerClient) getRemoteAddr(cm mnet.Client) (net.Addr, error) {
+func (nc *tcpServerClient) getRemoteAddr() (net.Addr, error) {
 	return nc.remoteAddr, nil
 }
 
-func (nc *tcpServerClient) getLocalAddr(cm mnet.Client) (net.Addr, error) {
+func (nc *tcpServerClient) getLocalAddr() (net.Addr, error) {
 	return nc.localAddr, nil
 }
 
-func (nc *tcpServerClient) closeConn(cm mnet.Client) error {
-	return nc.closeConnection(cm)
+func (nc *tcpServerClient) closeConn() error {
+	return nc.closeConnection()
 }
 
 // readLoop handles the necessary operation of reading data from the
 // underline connection.
-func (nc *tcpServerClient) readLoop(cm mnet.Client) {
-	defer nc.closeConnection(cm)
+func (nc *tcpServerClient) readLoop() {
+	defer nc.closeConnection()
 	defer nc.worker.Done()
 
 	var cn net.Conn
@@ -909,7 +909,7 @@ func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWrite
 	n.cu.RLock()
 	for _, conn := range n.clients {
 		n.cu.RUnlock()
-		conn.closeConnection(mnet.Client{})
+		conn.closeConnection()
 		n.cu.RLock()
 	}
 	n.cu.RUnlock()
@@ -947,13 +947,13 @@ func (n *TCPNetwork) Wait() {
 	n.routines.Wait()
 }
 
-func (n *TCPNetwork) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
+func (n *TCPNetwork) getOtherClients(cid string) ([]mnet.Client, error) {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
 	var clients []mnet.Client
 	for id, conn := range n.clients {
-		if id == cm.ID {
+		if id == cid {
 			continue
 		}
 
@@ -969,7 +969,10 @@ func (n *TCPNetwork) getOtherClients(cm mnet.Client) ([]mnet.Client, error) {
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr
-		client.SiblingsFunc = n.getOtherClients
+		client.SiblingsFunc = func() ([]mnet.Client, error) {
+			return n.getOtherClients(cid)
+		}
+
 		clients = append(clients, client)
 	}
 
@@ -1161,13 +1164,15 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	client.IsClusterFunc = nc.isCluster
 	client.LocalAddrFunc = nc.getLocalAddr
 	client.StatisticFunc = nc.getStatistics
-	client.SiblingsFunc = n.getOtherClients
 	client.RemoteAddrFunc = nc.getRemoteAddr
+	client.SiblingsFunc = func() ([]mnet.Client, error) {
+		return n.getOtherClients(nc.id)
+	}
 
 	nc.worker.Add(1)
-	go nc.readLoop(client)
+	go nc.readLoop()
 
-	if err := nc.handshake(client); err != nil {
+	if err := nc.handshake(); err != nil {
 		return err
 	}
 
@@ -1178,7 +1183,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	atomic.AddInt64(&n.totalClients, 1)
 	go func() {
 		if err := n.Handler(client); err != nil {
-			nc.closeConnection(client)
+			nc.closeConnection()
 
 			n.Metrics.Emit(
 				metrics.Error(err),

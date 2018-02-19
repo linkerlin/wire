@@ -95,7 +95,7 @@ func (n *targetConn) readIncoming(r io.Reader) error {
 
 // write returns an appropriate io.WriteCloser with appropriate size
 // to contain data to be written to be connection.
-func (n *targetConn) flush(cm mnet.Client) error {
+func (n *targetConn) flush() error {
 	if err := n.network.isAlive(); err != nil {
 		return err
 	}
@@ -171,8 +171,8 @@ func (n *targetConn) writeAction(size []byte, data []byte) error {
 
 // write returns an appropriate io.WriteCloser with appropriate size
 // to contain data to be written to be connection.
-func (n *targetConn) write(cm mnet.Client, size int) (io.WriteCloser, error) {
-	if err := n.isAlive(cm); err != nil {
+func (n *targetConn) write(size int) (io.WriteCloser, error) {
+	if err := n.isAlive(); err != nil {
 		return nil, err
 	}
 
@@ -195,16 +195,16 @@ func (n *targetConn) write(cm mnet.Client, size int) (io.WriteCloser, error) {
 	return newWriter, nil
 }
 
-func (n *targetConn) localAddr(cm mnet.Client) (net.Addr, error) {
+func (n *targetConn) localAddr() (net.Addr, error) {
 	return n.laddr, nil
 }
 
-func (n *targetConn) remoteAddr(cm mnet.Client) (net.Addr, error) {
+func (n *targetConn) remoteAddr() (net.Addr, error) {
 	return n.raddr, nil
 }
 
-func (n *targetConn) read(cm mnet.Client) ([]byte, error) {
-	if err := n.isAlive(cm); err != nil {
+func (n *targetConn) read() ([]byte, error) {
+	if err := n.isAlive(); err != nil {
 		return nil, err
 	}
 
@@ -214,23 +214,23 @@ func (n *targetConn) read(cm mnet.Client) ([]byte, error) {
 	return indata, err
 }
 
-func (n *targetConn) noop(cm mnet.Client) error {
+func (n *targetConn) noop() error {
 	return nil
 }
 
-func (n *targetConn) isAlive(cm mnet.Client) error {
+func (n *targetConn) isAlive() error {
 	if atomic.LoadInt64(&n.closed) == 1 {
 		return mnet.ErrAlreadyClosed
 	}
 	return n.network.isAlive()
 }
 
-func (n *targetConn) close(cm mnet.Client) error {
+func (n *targetConn) close() error {
 	atomic.StoreInt64(&n.closed, 1)
 	return nil
 }
 
-func (n *targetConn) stats(cm mnet.Client) (mnet.ClientStatistic, error) {
+func (n *targetConn) stats() (mnet.ClientStatistic, error) {
 	var stats mnet.ClientStatistic
 	stats.ID = n.id
 	stats.Local = n.laddr
@@ -412,7 +412,7 @@ func (n *UDPNetwork) getAllClient(skipAddr net.Addr) []mnet.Client {
 		mclient.LocalAddrFunc = client.localAddr
 		mclient.RemoteAddrFunc = client.remoteAddr
 
-		mclient.SiblingsFunc = func(_ mnet.Client) ([]mnet.Client, error) {
+		mclient.SiblingsFunc = func() ([]mnet.Client, error) {
 			return n.getAllClient(client.mainAddr), nil
 		}
 
@@ -459,7 +459,7 @@ func (n *UDPNetwork) addClient(addr net.Addr, conn *net.UDPConn) *targetConn {
 		mclient.LocalAddrFunc = client.localAddr
 		mclient.RemoteAddrFunc = client.remoteAddr
 
-		mclient.SiblingsFunc = func(_ mnet.Client) ([]mnet.Client, error) {
+		mclient.SiblingsFunc = func() ([]mnet.Client, error) {
 			return n.getAllClient(addr), nil
 		}
 
@@ -468,7 +468,7 @@ func (n *UDPNetwork) addClient(addr net.Addr, conn *net.UDPConn) *targetConn {
 			defer atomic.StoreInt64(&client.closed, 1)
 			defer n.rung.Done()
 
-			if err := n.Handler(mc); err != nil {
+			if err := n.Handler(mclient); err != nil {
 				n.Metrics.Emit(
 					metrics.Error(err),
 					metrics.WithID(client.id),

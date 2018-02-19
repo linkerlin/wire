@@ -135,43 +135,43 @@ type ConnHandler func(Client) error
 
 // ReaderFunc defines a function which takes giving incoming Client and returns associated
 // data and error.
-type ReaderFunc func(Client) ([]byte, error)
+type ReaderFunc func() ([]byte, error)
 
 // WriteFunc defines a function type which takes a client, the max size of data to be written
 // and returns a writer through which it receives data for only that specific size.
-type WriteFunc func(Client, int) (io.WriteCloser, error)
+type WriteFunc func(int) (io.WriteCloser, error)
 
 // WriteStreamFunc defines a function type which takes a client, a total size of data to written
 // and the max chunk size to split all data written to its writer. This allows us equally use
 // the writer returned to stream large data size whilst ensuring that we still transfer in small
 // sizes with minimal wait.
-type StreamFunc func(Client, string, int, int) (io.WriteCloser, error)
+type StreamFunc func(string, int, int) (io.WriteCloser, error)
 
 // SiblingsFunc defines a function which returns a list of sibling funcs.
-type SiblingsFunc func(Client) ([]Client, error)
+type SiblingsFunc func() ([]Client, error)
 
 // AddrFunc defines a function type which returns a net.Addr for a client.
-type AddrFunc func(Client) (net.Addr, error)
+type AddrFunc func() (net.Addr, error)
 
 // ClientFunc defines a function type which receives a Client type and
 // returns a possible error.
-type ClientFunc func(Client) error
+type ClientFunc func() error
 
 // InfoFunc defines a function type which returns a Info struct
 // for giving client.
-type InfoFunc func(Client) Info
+type InfoFunc func() Info
 
 // StateFunc defines a function type which receives a Client type and
 // returns a boolean value.
-type StateFunc func(Client) bool
+type StateFunc func() bool
 
 // ReconnectionFunc defines a function type which receives a Client pointer type and
 // is responsible for the reconnection of the client client connection.
-type ReconnectionFunc func(Client, string) error
+type ReconnectionFunc func(string) error
 
 // StatisticsFunc defines a function type which returns a Statistics
 // structs related to the user.
-type StatisticsFunc func(Client) (ClientStatistic, error)
+type StatisticsFunc func() (ClientStatistic, error)
 
 //*************************************************************************
 // Network and Client Stats
@@ -253,7 +253,7 @@ func (c Client) Info() Info {
 		return Info{ID: c.ID}
 	}
 
-	return c.InfoFunc(c)
+	return c.InfoFunc()
 }
 
 // LocalAddr returns local address associated with given client.
@@ -268,7 +268,7 @@ func (c Client) LocalAddr() (net.Addr, error) {
 		return nil, ErrAddrNotProvided
 	}
 
-	addr, err := c.LocalAddrFunc(c)
+	addr, err := c.LocalAddrFunc()
 	if err != nil {
 		c.Metrics.Emit(
 			metrics.Error(err),
@@ -294,7 +294,7 @@ func (c Client) RemoteAddr() (net.Addr, error) {
 		return nil, ErrAddrNotProvided
 	}
 
-	addr, err := c.RemoteAddrFunc(c)
+	addr, err := c.RemoteAddrFunc()
 	if err != nil {
 		c.Metrics.Emit(
 			metrics.Error(err),
@@ -317,7 +317,7 @@ func (c Client) IsCluster() bool {
 		return false
 	}
 
-	return c.IsClusterFunc(c)
+	return c.IsClusterFunc()
 }
 
 // Live returns an error if client is not currently live or connected to
@@ -332,7 +332,7 @@ func (c Client) Live() error {
 		return ErrLiveCheckNotAllowed
 	}
 
-	if err := c.LiveFunc(c); err != nil {
+	if err := c.LiveFunc(); err != nil {
 		c.Metrics.Emit(
 			metrics.Error(err),
 			metrics.WithID(c.ID),
@@ -359,7 +359,7 @@ func (c Client) Reconnect(altAddr string) error {
 		return ErrClientReconnectionUnavailable
 	}
 
-	if err := c.ReconnectionFunc(c, altAddr); err != nil {
+	if err := c.ReconnectionFunc(altAddr); err != nil {
 		c.Metrics.Emit(
 			metrics.WithID(c.ID),
 			metrics.Message("Client.Reconnect"),
@@ -388,7 +388,7 @@ func (c Client) Read() ([]byte, error) {
 		return nil, ErrReadNotAllowed
 	}
 
-	return c.ReaderFunc(c)
+	return c.ReaderFunc()
 }
 
 // Write returns a writer to writes provided data of specified size into
@@ -402,7 +402,7 @@ func (c Client) Write(toWriteSize int) (io.WriteCloser, error) {
 		return nil, ErrWriteNotAllowed
 	}
 
-	return c.WriteFunc(c, toWriteSize)
+	return c.WriteFunc(toWriteSize)
 }
 
 // Flush sends all accumulated message within clients buffer into
@@ -412,7 +412,7 @@ func (c Client) Flush() error {
 		return ErrFlushNotAllowed
 	}
 
-	return c.FlushFunc(c)
+	return c.FlushFunc()
 }
 
 // Statistics returns statistics associated with client.j
@@ -427,7 +427,7 @@ func (c Client) Statistics() (ClientStatistic, error) {
 		return ClientStatistic{}, ErrStatisticsNotProvided
 	}
 
-	return c.StatisticFunc(c)
+	return c.StatisticFunc()
 }
 
 // Close closes the underline client connection.
@@ -442,7 +442,7 @@ func (c Client) Close() error {
 		return ErrCloseNotAllowed
 	}
 
-	if err := c.CloseFunc(c); err != nil {
+	if err := c.CloseFunc(); err != nil {
 		c.Metrics.Emit(
 			metrics.WithID(c.ID),
 			metrics.Message("Client.Close"),
@@ -471,5 +471,5 @@ func (c Client) Others() ([]Client, error) {
 		return nil, ErrSiblingsNotAllowed
 	}
 
-	return c.SiblingsFunc(c)
+	return c.SiblingsFunc()
 }

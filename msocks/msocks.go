@@ -173,7 +173,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.RemoteAddrFunc = network.getRemoteAddr
 	c.ReconnectionFunc = network.reconnect
 
-	if err := network.reconnect(c, addr); err != nil {
+	if err := network.reconnect(addr); err != nil {
 		return c, err
 	}
 
@@ -197,7 +197,7 @@ func (cn *socketClient) isStarted() bool {
 	return atomic.LoadInt64(&cn.started) == 1
 }
 
-func (cn *socketClient) getInfo(cm mnet.Client) mnet.Info {
+func (cn *socketClient) getInfo() mnet.Info {
 	addr := cn.addr
 	if cn.remoteAddr != nil {
 		addr = cn.remoteAddr.String()
@@ -211,24 +211,24 @@ func (cn *socketClient) getInfo(cm mnet.Client) mnet.Info {
 	}
 }
 
-func (cn *socketClient) sendRescue(cm mnet.Client) error {
-	wc, err := cn.write(cm, len(rescueBytes))
+func (cn *socketClient) sendRescue() error {
+	wc, err := cn.write(len(rescueBytes))
 	if err != nil {
 		return err
 	}
 
 	wc.Write(rescueBytes)
 	wc.Close()
-	return cn.flush(cm)
+	return cn.flush()
 }
 
-func (cn *socketClient) handleCINFO(cm mnet.Client) error {
-	jsn, err := json.Marshal(cn.getInfo(cm))
+func (cn *socketClient) handleCINFO() error {
+	jsn, err := json.Marshal(cn.getInfo())
 	if err != nil {
 		return err
 	}
 
-	wc, err := cn.write(cm, len(jsn)+len(rinfoBytes))
+	wc, err := cn.write(len(jsn) + len(rinfoBytes))
 	if err != nil {
 		return err
 	}
@@ -236,10 +236,10 @@ func (cn *socketClient) handleCINFO(cm mnet.Client) error {
 	wc.Write(rinfoBytes)
 	wc.Write(jsn)
 	wc.Close()
-	return cn.flush(cm)
+	return cn.flush()
 }
 
-func (cn *socketClient) respondToINFO(cm mnet.Client, conn net.Conn, reader io.Reader) error {
+func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 	cn.metrics.Emit(
 		metrics.WithID(cn.id),
 		metrics.With("client", cn.id),
@@ -259,7 +259,7 @@ func (cn *socketClient) respondToINFO(cm mnet.Client, conn net.Conn, reader io.R
 	for {
 		// if we failed and timed out, then send rescue message and re-await.
 		if sendRescueMsg {
-			if err := cn.sendRescue(cm); err != nil {
+			if err := cn.sendRescue(); err != nil {
 				cn.metrics.Emit(
 					metrics.Error(err),
 					metrics.WithID(cn.id),
@@ -342,21 +342,21 @@ func (cn *socketClient) respondToINFO(cm mnet.Client, conn net.Conn, reader io.R
 		metrics.Message("socketClient.Handshake: Sending CINFO completed"),
 	)
 
-	return cn.handleCINFO(cm)
+	return cn.handleCINFO()
 }
 
-func (cn *socketClient) close(jn mnet.Client) error {
-	if err := cn.isAlive(jn); err != nil {
+func (cn *socketClient) close() error {
+	if err := cn.isAlive(); err != nil {
 		return mnet.ErrAlreadyClosed
 	}
 
-	err := cn.websocketServerClient.close(jn)
+	err := cn.websocketServerClient.close()
 	cn.waiter.Wait()
 	return err
 }
 
-func (cn *socketClient) reconnect(jn mnet.Client, addr string) error {
-	if err := cn.isAlive(jn); err == nil && cn.isStarted() {
+func (cn *socketClient) reconnect(addr string) error {
+	if err := cn.isAlive(); err == nil && cn.isStarted() {
 		return nil
 	}
 
@@ -403,7 +403,7 @@ func (cn *socketClient) reconnect(jn mnet.Client, addr string) error {
 	cn.wsWriter = writer
 	cn.bu.Unlock()
 
-	if err := cn.respondToINFO(jn, conn, reader); err != nil {
+	if err := cn.respondToINFO(conn, reader); err != nil {
 		return err
 	}
 
