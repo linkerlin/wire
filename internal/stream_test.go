@@ -17,7 +17,7 @@ func TestClientStream(t *testing.T) {
 	ch := new(chunkWriter)
 
 	var c mnet.Client
-	c.WriteFunc = func(_ mnet.Client, i int) (io.WriteCloser, error) {
+	c.WriteFunc = func(i int) (io.WriteCloser, error) {
 		return &limitWriter{limit: i, chunks: ch}, nil
 	}
 
