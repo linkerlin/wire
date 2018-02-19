@@ -120,8 +120,8 @@ type Hook interface {
 	NetworkClosed()
 	NetworkStarted()
 	NodeAdded(Client)
-	NodeDisconnected(Client)
 	ClusterAdded(Client)
+	NodeDisconnected(Client)
 	ClusterDisconnected(Client)
 }
 
