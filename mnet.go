@@ -1,6 +1,7 @@
 package mnet
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math"
@@ -39,75 +40,39 @@ var (
 	ErrClientReconnectionUnavailable = errors.New("client reconnection not available")
 )
 
-//************************************************************************
-// RetryPolicy interface and Implementation
-//************************************************************************
+//*************************************************************************
+// Network Type
+//*************************************************************************
 
-// RetryPolicy defines a interface which exposes a single method which is
-// called to perform a giving action until some criteria is met or the
-// conditions for possible retries is become invalid thereby returning an
-// error.
-type RetryPolicy interface {
-	Retry() error
+// Network defines an interface type which is defines specific function
+// to startup a underline network system.
+type Network interface {
+	Wait()
+	Addrs() net.Addr
+	Start(context.Context) error
 }
 
-// RetryAction defines a function type which called would return an error
-// if it's internal operation or state fails.
-type RetryAction func() error
-
-// DelayJudge defines a function which takes a giving count value
-// returning a time.Duration usable to wait before attempting a
-// another call.
-type DelayJudge func(int) time.Duration
-
-// FunctionRetryPolicy returns a new RetryPolicy which uses provided function
-// to retry said actions till no error is received or till we max out possible
-// allowed retries.
-func FunctionPolicy(max int, action RetryAction, delay DelayJudge) RetryPolicy {
-	return &fnRetryPolicy{
-		delay:  delay,
-		action: action,
-		max:    max,
-	}
+// ClusteredNetwork defines an interface that embeds the Network interface
+// and provides a method to add another cluster network as a connection
+// to an implementation of the Network interface through it's AddCluster
+// method.
+type ClusteredNetwork interface {
+	Network
+	AddCluster(string) error
 }
 
-type fnRetryPolicy struct {
-	max    int
-	now    int
-	delay  DelayJudge
-	action RetryAction
-}
+//*************************************************************************
+// Client Service Type
+//*************************************************************************
 
-// Retry attempts to run giving action until success or else
-// will attempt to generate continuous longer sleep durations
-// to wait before next try. If it has expired all possible tries
-// then it stops, else will exhaust all possible tries.
-func (fn *fnRetryPolicy) Retry() error {
-	if fn.now >= fn.max {
-		return errors.New("already expired")
-	}
-
-	for {
-		fn.now++
-		if nextDelay := fn.delay(fn.now); nextDelay > 0 {
-			time.Sleep(nextDelay)
-		}
-
-		if err := fn.action(); err == nil {
-			fn.now = 0
-			return nil
-		}
-	}
-	return errors.New("expired retries")
-}
-
-// ExponentialDelay returns a DelayJudge which for every giving time
-// will expand it's next duration by the provided exampnd value times
-// an exponential calculation of the current try value.
-func ExponentialDelay(expand time.Duration) DelayJudge {
-	return func(i int) time.Duration {
-		return time.Duration(math.Exp2(float64(i))) * expand
-	}
+// ClientService defines a interface which represent a structure which is
+// suited to handle/serve a single instance of a Client connection.
+// This should be used in conjunction with the various network implementations
+// of the Client type, where the ClientService.ServeClient method would be
+// goroutined to handle and service all requests and response related to
+// a connected Client.
+type ClientService interface {
+	ServeClient(Client) error
 }
 
 //*************************************************************************
@@ -187,11 +152,11 @@ type Info struct {
 // data and error.
 type ReaderFunc func() ([]byte, error)
 
-// WriteFunc defines a function type which takes a client, the max size of data to be written
+// WriteFunc defines a function type takes the max size of data to be written
 // and returns a writer through which it receives data for only that specific size.
 type WriteFunc func(int) (io.WriteCloser, error)
 
-// WriteStreamFunc defines a function type which takes a client, a total size of data to written
+// WriteStreamFunc defines a function type which takes a total size of data to written
 // and the max chunk size to split all data written to its writer. This allows us equally use
 // the writer returned to stream large data size whilst ensuring that we still transfer in small
 // sizes with minimal wait.
@@ -203,7 +168,7 @@ type SiblingsFunc func() ([]Client, error)
 // AddrFunc defines a function type which returns a net.Addr for a client.
 type AddrFunc func() (net.Addr, error)
 
-// ClientFunc defines a function type which receives a Client type and
+// ClientFunc defines a function type which .Meta
 // returns a possible error.
 type ClientFunc func() error
 
@@ -211,12 +176,15 @@ type ClientFunc func() error
 // for giving client.
 type InfoFunc func() Info
 
-// StateFunc defines a function type which receives a Client type and
-// returns a boolean value.
+// StateFunc defines a function type which returns a boolean value for a state.
 type StateFunc func() bool
 
-// ReconnectionFunc defines a function type which receives a Client pointer type and
-// is responsible for the reconnection of the client client connection.
+// StateFunc defines a function type which returns a boolean value for a state
+// and returns an error as well.
+type StateWithErrorFunc func() (bool, error)
+
+// ReconnectionFunc defines a function type which is responsible for
+// the reconnection of the client client connection.
 type ReconnectionFunc func(string) error
 
 // StatisticsFunc defines a function type which returns a Statistics
@@ -240,6 +208,7 @@ type Client struct {
 	LiveFunc         ClientFunc
 	FlushFunc        ClientFunc
 	IsClusterFunc    StateFunc
+	HasPendingFunc   StateFunc
 	SiblingsFunc     SiblingsFunc
 	StatisticFunc    StatisticsFunc
 	ReconnectionFunc ReconnectionFunc
@@ -314,14 +283,24 @@ func (c Client) RemoteAddr() (net.Addr, error) {
 
 // IsCluster returns true if giving connection is a server-to-server
 // connection or false if its a client-to-cluster connection.
-// NOTE: It will by default returns false if no function for Client.IsClusterFunc
-// is provided.
+// NOTE: It will by default returns false if no function for
+// Client.IsClusterFunc is provided.
 func (c Client) IsCluster() bool {
 	if c.IsClusterFunc == nil {
 		return false
 	}
 
 	return c.IsClusterFunc()
+}
+
+// HasPending returns true/false if any data is still awaiting
+// flushing into the underline network writer.
+func (c Client) HasPending() bool {
+	if c.HasPendingFunc == nil {
+		return false
+	}
+
+	return c.HasPendingFunc()
 }
 
 // Live returns an error if client is not currently live or connected to
@@ -476,4 +455,75 @@ func (c Client) Others() ([]Client, error) {
 	}
 
 	return c.SiblingsFunc()
+}
+
+//************************************************************************
+// RetryPolicy interface and Implementation
+//************************************************************************
+
+// RetryPolicy defines a interface which exposes a single method which is
+// called to perform a giving action until some criteria is met or the
+// conditions for possible retries is become invalid thereby returning an
+// error.
+type RetryPolicy interface {
+	Retry() error
+}
+
+// RetryAction defines a function type which called would return an error
+// if it's internal operation or state fails.
+type RetryAction func() error
+
+// DelayJudge defines a function which takes a giving count value
+// returning a time.Duration usable to wait before attempting a
+// another call.
+type DelayJudge func(int) time.Duration
+
+// FunctionRetryPolicy returns a new RetryPolicy which uses provided function
+// to retry said actions till no error is received or till we max out possible
+// allowed retries.
+func FunctionPolicy(max int, action RetryAction, delay DelayJudge) RetryPolicy {
+	return &fnRetryPolicy{
+		delay:  delay,
+		action: action,
+		max:    max,
+	}
+}
+
+type fnRetryPolicy struct {
+	max    int
+	now    int
+	delay  DelayJudge
+	action RetryAction
+}
+
+// Retry attempts to run giving action until success or else
+// will attempt to generate continuous longer sleep durations
+// to wait before next try. If it has expired all possible tries
+// then it stops, else will exhaust all possible tries.
+func (fn *fnRetryPolicy) Retry() error {
+	if fn.now >= fn.max {
+		return errors.New("already expired")
+	}
+
+	for {
+		fn.now++
+		if nextDelay := fn.delay(fn.now); nextDelay > 0 {
+			time.Sleep(nextDelay)
+		}
+
+		if err := fn.action(); err == nil {
+			fn.now = 0
+			return nil
+		}
+	}
+	return errors.New("expired retries")
+}
+
+// ExponentialDelay returns a DelayJudge which for every giving time
+// will expand it's next duration by the provided exampnd value times
+// an exponential calculation of the current try value.
+func ExponentialDelay(expand time.Duration) DelayJudge {
+	return func(i int) time.Duration {
+		return time.Duration(math.Exp2(float64(i))) * expand
+	}
 }

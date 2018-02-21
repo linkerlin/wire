@@ -235,6 +235,20 @@ func (sc *websocketServerClient) serverRead() ([]byte, error) {
 	return indata, nil
 }
 
+func (sc *websocketServerClient) hasPending() bool {
+	if err := sc.isAlive(); err != nil {
+		return false
+	}
+
+	sc.bu.Lock()
+	defer sc.bu.Unlock()
+	if sc.wsWriter == nil {
+		return false
+	}
+
+	return sc.wsWriter.Buffered() > 0
+}
+
 func (sc *websocketServerClient) flush() error {
 	if err := sc.isAlive(); err != nil {
 		return err
@@ -861,10 +875,36 @@ type WebsocketNetwork struct {
 	// and will be written directly.
 	MaxWriteSize int
 
+	ctx    context.Context
+	cancel func()
+
 	raddr    net.Addr
 	cu       sync.RWMutex
 	clients  map[string]*websocketServerClient
 	routines sync.WaitGroup
+}
+
+// Close ends the tcp listener and closes the underline network.
+func (n *WebsocketNetwork) Close() error {
+	if n.cancel != nil {
+		n.cancel()
+	}
+
+	if n.ctx != nil {
+		return n.ctx.Err()
+	}
+
+	return nil
+}
+
+// Addrs returns the net.Addr of the giving network.
+func (n *WebsocketNetwork) Addrs() net.Addr {
+	if n.raddr != nil {
+		return n.raddr
+	}
+
+	addr, _ := net.ResolveUDPAddr("tcp", n.Addr)
+	return addr
 }
 
 func (n *WebsocketNetwork) isAlive() error {
@@ -879,6 +919,8 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 	if err := n.isAlive(); err == nil {
 		return nil
 	}
+
+	n.ctx, n.cancel = context.WithCancel(ctx)
 
 	if n.ID == "" {
 		n.ID = uuid.NewV4().String()
@@ -947,9 +989,9 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 	}
 
 	n.routines.Add(1)
-	go n.handleConnections(ctx, stream)
+	go n.handleConnections(n.ctx, stream)
 	go func() {
-		<-ctx.Done()
+		<-n.ctx.Done()
 		stream.Close()
 		if n.Hook != nil {
 			n.Hook.NetworkClosed()
@@ -1219,6 +1261,7 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	mclient.LiveFunc = client.isAlive
 	mclient.InfoFunc = client.getInfo
 	mclient.ReaderFunc = client.serverRead
+	mclient.HasPendingFunc = client.hasPending
 	mclient.LocalAddrFunc = client.getLocalAddr
 	mclient.StatisticFunc = client.getStatistics
 	mclient.RemoteAddrFunc = client.getRemoteAddr
@@ -1322,6 +1365,7 @@ func (n *WebsocketNetwork) getAllClient(cid string) ([]mnet.Client, error) {
 		client.InfoFunc = conn.getInfo
 		client.WriteFunc = conn.write
 		client.FlushFunc = conn.flush
+		client.HasPendingFunc = conn.hasPending
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr

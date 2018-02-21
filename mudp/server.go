@@ -91,6 +91,21 @@ func (n *targetConn) readIncoming(r io.Reader) error {
 	}
 }
 
+func (n *targetConn) hasPendingFlush() bool {
+	if err := n.network.isAlive(); err != nil {
+		return false
+	}
+
+	n.bu.Lock()
+	defer n.bu.Unlock()
+
+	if n.bw == nil {
+		return false
+	}
+
+	return n.bw.Buffered() > 0
+}
+
 // write returns an appropriate io.WriteCloser with appropriate size
 // to contain data to be written to be connection.
 func (n *targetConn) flush() error {
@@ -165,6 +180,45 @@ func (n *targetConn) writeAction(size []byte, data []byte) error {
 	}
 
 	return nil
+}
+
+func (n *targetConn) writeTo(size int, addr net.Addr) (io.WriteCloser, error) {
+	if err := n.isAlive(); err != nil {
+		return nil, err
+	}
+
+	var conn *net.UDPConn
+	n.network.mu.Lock()
+	conn = n.network.conn
+	n.network.mu.Unlock()
+
+	if conn == nil {
+		return nil, mnet.ErrAlreadyClosed
+	}
+
+	newWriter := actionWriterPool.Get().(*internal.ActionLengthWriter)
+	newWriter.Reset(func(size []byte, data []byte) error {
+		defer actionWriterPool.Put(newWriter)
+		if addr == nil {
+			_, err := conn.Write(size)
+			if err == nil {
+				return err
+			}
+
+			_, err = conn.Write(data)
+			return err
+		}
+
+		_, err := conn.WriteTo(size, addr)
+		if err != nil {
+			return err
+		}
+
+		_, err = conn.WriteTo(data, addr)
+		return err
+	}, mnet.HeaderLength, size)
+
+	return newWriter, nil
 }
 
 // write returns an appropriate io.WriteCloser with appropriate size
@@ -269,6 +323,7 @@ type UDPNetwork struct {
 	started      int64
 
 	ctx     context.Context
+	cancel  func()
 	addr    *net.UDPAddr
 	raddr   net.Addr
 	laddr   net.Addr
@@ -277,6 +332,19 @@ type UDPNetwork struct {
 	clients map[string]*targetConn
 	mu      sync.Mutex
 	conn    *net.UDPConn
+}
+
+// Close ends the tcp listener and closes the underline network.
+func (n *UDPNetwork) Close() error {
+	if n.cancel != nil {
+		n.cancel()
+	}
+
+	if n.ctx != nil {
+		return n.ctx.Err()
+	}
+
+	return nil
 }
 
 func (n *UDPNetwork) isAlive() error {
@@ -295,6 +363,21 @@ func (n *UDPNetwork) isActive(ctx context.Context) bool {
 	}
 }
 
+// Addrs returns the net.Addr of the giving network.
+func (n *UDPNetwork) Addrs() net.Addr {
+	if n.raddr != nil {
+		return n.raddr
+	}
+
+	if n.UDPNetwork != "" {
+		addr, _ := net.ResolveUDPAddr(n.UDPNetwork, n.Addr)
+		return addr
+	}
+
+	addr, _ := net.ResolveUDPAddr("udp", n.Addr)
+	return addr
+}
+
 // Wait blocks the call till all go-routines created by network has shutdown.
 func (n *UDPNetwork) Wait() {
 	n.rung.Wait()
@@ -306,6 +389,8 @@ func (n *UDPNetwork) Start(ctx context.Context) error {
 	if err := n.isAlive(); err == nil {
 		return err
 	}
+
+	n.ctx, n.cancel = context.WithCancel(ctx)
 
 	n.clients = make(map[string]*targetConn)
 
@@ -362,8 +447,8 @@ func (n *UDPNetwork) Start(ctx context.Context) error {
 	n.rung.Add(2)
 
 	atomic.StoreInt64(&n.started, 1)
-	go n.handleConnections(ctx, serverConn)
-	go n.handleCloseRequest(ctx, serverConn)
+	go n.handleConnections(n.ctx, serverConn)
+	go n.handleCloseRequest(n.ctx, serverConn)
 
 	if n.Hook != nil {
 		n.Hook.NetworkStarted()
@@ -401,6 +486,7 @@ func (n *UDPNetwork) getAllClient(skipAddr net.Addr) []mnet.Client {
 		mclient.StatisticFunc = client.stats
 		mclient.LocalAddrFunc = client.localAddr
 		mclient.RemoteAddrFunc = client.remoteAddr
+		mclient.HasPendingFunc = client.hasPendingFlush
 
 		mclient.SiblingsFunc = func() ([]mnet.Client, error) {
 			return n.getAllClient(client.mainAddr), nil
@@ -447,6 +533,7 @@ func (n *UDPNetwork) addClient(addr net.Addr, conn *net.UDPConn) *targetConn {
 		mclient.StatisticFunc = client.stats
 		mclient.LocalAddrFunc = client.localAddr
 		mclient.RemoteAddrFunc = client.remoteAddr
+		mclient.HasPendingFunc = client.hasPendingFlush
 
 		mclient.SiblingsFunc = func() ([]mnet.Client, error) {
 			return n.getAllClient(addr), nil

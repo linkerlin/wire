@@ -137,6 +137,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.ReaderFunc = network.read
 	c.WriteFunc = network.write
 	c.CloseFunc = network.close
+	c.HasPendingFunc = network.hasPending
 	c.LocalAddrFunc = network.getLocalAddr
 	c.RemoteAddrFunc = network.getRemoteAddr
 	c.ReconnectionFunc = network.reconnect
@@ -356,6 +357,20 @@ func (cn *clientNetwork) getLocalAddr() (net.Addr, error) {
 	cn.cu.RLock()
 	defer cn.cu.RUnlock()
 	return cn.localAddr, nil
+}
+
+func (cn *clientNetwork) hasPending() bool {
+	if err := cn.isLive(); err != nil {
+		return false
+	}
+
+	cn.bu.Lock()
+	defer cn.bu.Unlock()
+	if cn.buffWriter == nil {
+		return false
+	}
+
+	return cn.buffWriter.Buffered() > 0
 }
 
 func (cn *clientNetwork) flush() error {

@@ -152,6 +152,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.LiveFunc = network.isAlive
 	c.InfoFunc = network.getInfo
 	c.ReaderFunc = network.clientRead
+	c.HasPendingFunc = network.hasPending
 	c.StatisticFunc = network.getStatistics
 	c.LocalAddrFunc = network.getLocalAddr
 	c.RemoteAddrFunc = network.getRemoteAddr

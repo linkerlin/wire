@@ -97,6 +97,20 @@ func (nc *tcpServerClient) getStatistics() (mnet.ClientStatistic, error) {
 	return stats, nil
 }
 
+func (nc *tcpServerClient) hasPending() bool {
+	if err := nc.isLive(); err != nil {
+		return false
+	}
+
+	nc.bu.Lock()
+	defer nc.bu.Unlock()
+	if nc.buffWriter == nil {
+		return false
+	}
+
+	return nc.buffWriter.Buffered() > 0
+}
+
 func (nc *tcpServerClient) flush() error {
 	if err := nc.isLive(); err != nil {
 		return err
@@ -795,12 +809,27 @@ type TCPNetwork struct {
 	// till flush must not exceed else will not be buffered and will be written directly.
 	MaxWriteSize int
 
+	ctx    context.Context
+	cancel func()
+
 	raddr    net.Addr
 	pool     chan func()
 	cu       sync.RWMutex
 	clients  map[string]*tcpServerClient
-	ctx      context.Context
 	routines sync.WaitGroup
+}
+
+// Close ends the tcp listener and closes the underline network.
+func (n *TCPNetwork) Close() error {
+	if n.cancel != nil {
+		n.cancel()
+	}
+
+	if n.ctx != nil {
+		return n.ctx.Err()
+	}
+
+	return nil
 }
 
 // Start initializes the network listener.
@@ -808,6 +837,8 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	if n.Metrics == nil {
 		n.Metrics = metrics.New()
 	}
+
+	n.ctx, n.cancel = context.WithCancel(ctx)
 
 	if n.ID == "" {
 		n.ID = uuid.NewV4().String()
@@ -862,7 +893,7 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 
 	n.routines.Add(2)
 	go n.runStream(stream)
-	go n.handleClose(ctx, stream)
+	go n.handleClose(n.ctx, stream)
 
 	if n.Hook != nil {
 		n.Hook.NetworkStarted()
@@ -949,6 +980,7 @@ func (n *TCPNetwork) getOtherClients(cid string) ([]mnet.Client, error) {
 		client.FlushFunc = conn.flush
 		client.WriteFunc = conn.write
 		client.IsClusterFunc = conn.isCluster
+		client.HasPendingFunc = conn.hasPending
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr
@@ -1143,6 +1175,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	client.FlushFunc = nc.flush
 	client.CloseFunc = nc.closeConn
 	client.IsClusterFunc = nc.isCluster
+	client.HasPendingFunc = nc.hasPending
 	client.LocalAddrFunc = nc.getLocalAddr
 	client.StatisticFunc = nc.getStatistics
 	client.RemoteAddrFunc = nc.getRemoteAddr
@@ -1211,6 +1244,16 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	}
 
 	return nil
+}
+
+// Addrs returns the net.Addr of the giving network.
+func (n *TCPNetwork) Addrs() net.Addr {
+	if n.raddr != nil {
+		return n.raddr
+	}
+
+	addr, _ := net.ResolveUDPAddr("tcp", n.Addr)
+	return addr
 }
 
 // runStream runs the process of listening for new connections and

@@ -125,6 +125,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	c.StatisticFunc = network.stats
 	c.LiveFunc = network.isAlive
 	c.LocalAddrFunc = network.localAddr
+	c.HasPendingFunc = network.hasPending
 	c.RemoteAddrFunc = network.remoteAddr
 	c.ReconnectionFunc = network.reconnect
 
@@ -170,7 +171,7 @@ type clientConn struct {
 
 	br   *internal.LengthRecvReader
 	cu   sync.Mutex
-	conn net.Conn
+	conn *net.UDPConn
 	bu   sync.Mutex
 	bw   *bufio.Writer
 }
@@ -249,6 +250,20 @@ func (cn *clientConn) isAlive() error {
 	return nil
 }
 
+func (cn *clientConn) hasPending() bool {
+	if err := cn.isAlive(); err != nil {
+		return false
+	}
+
+	cn.bu.Lock()
+	defer cn.bu.Unlock()
+	if cn.bw == nil {
+		return false
+	}
+
+	return cn.bw.Buffered() > 0
+}
+
 // write returns an appropriate io.WriteCloser with appropriate size
 // to contain data to be written to be connection.
 func (cn *clientConn) flush() error {
@@ -320,6 +335,45 @@ func (cn *clientConn) writeAction(size []byte, data []byte) error {
 	}
 
 	return nil
+}
+
+func (cn *clientConn) writeTo(size int, addr net.Addr) (io.WriteCloser, error) {
+	if err := cn.isAlive(); err != nil {
+		return nil, err
+	}
+
+	var conn *net.UDPConn
+	cn.cu.Lock()
+	conn = cn.conn
+	cn.cu.Unlock()
+
+	if conn == nil {
+		return nil, mnet.ErrAlreadyClosed
+	}
+
+	newWriter := actionWriterPool.Get().(*internal.ActionLengthWriter)
+	newWriter.Reset(func(size []byte, data []byte) error {
+		defer actionWriterPool.Put(newWriter)
+		if addr == nil {
+			_, err := conn.Write(size)
+			if err == nil {
+				return err
+			}
+
+			_, err = conn.Write(data)
+			return err
+		}
+
+		_, err := conn.WriteTo(size, addr)
+		if err != nil {
+			return err
+		}
+
+		_, err = conn.WriteTo(data, addr)
+		return err
+	}, mnet.HeaderLength, size)
+
+	return newWriter, nil
 }
 
 // write returns an appropriate io.WriteCloser with appropriate size
