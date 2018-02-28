@@ -7,32 +7,20 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/influx6/faux/metrics"
-	"github.com/influx6/faux/metrics/custom"
 	"github.com/influx6/faux/tests"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/msocks"
 )
 
 var (
-	events = metrics.New()
 	dialer = &net.Dialer{Timeout: 2 * time.Second}
 )
 
-func initMetrics() {
-	if testing.Verbose() {
-		events = metrics.New(custom.StackDisplay(os.Stderr))
-	}
-}
-
 func TestWebsocketServerWithMWebsocketClient(t *testing.T) {
-	initMetrics()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	netw, err := createNewNetwork(ctx, "localhost:4050")
 	if err != nil {
@@ -40,7 +28,7 @@ func TestWebsocketServerWithMWebsocketClient(t *testing.T) {
 	}
 	tests.Passed("Should have successfully created network")
 
-	client, err := msocks.Connect("ws://localhost:4050", msocks.Metrics(events))
+	client, err := msocks.Connect("ws://localhost:4050")
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully connected to network")
 	}
@@ -98,8 +86,6 @@ func TestWebsocketServerWithMWebsocketClient(t *testing.T) {
 }
 
 func TestNetwork_Add(t *testing.T) {
-	initMetrics()
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	netw, err := createNewNetwork(ctx, "localhost:4050")
@@ -120,7 +106,7 @@ func TestNetwork_Add(t *testing.T) {
 	}
 	tests.Passed("Should have successfully added net.Conn to network")
 
-	client, err := msocks.Connect("localhost:7050", msocks.Metrics(events))
+	client, err := msocks.Connect("localhost:7050")
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully connected to network")
 	}
@@ -183,7 +169,6 @@ func TestNetwork_Add(t *testing.T) {
 }
 
 func TestNetwork_ClusterConnect(t *testing.T) {
-	initMetrics()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -219,7 +204,6 @@ func TestNetwork_ClusterConnect(t *testing.T) {
 func createNewNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwork, error) {
 	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
-	netw.Metrics = events
 
 	netw.Handler = func(client mnet.Client) error {
 		for {
@@ -279,7 +263,6 @@ func createNewNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwor
 func createInfoNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwork, error) {
 	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
-	netw.Metrics = events
 
 	netw.Handler = func(client mnet.Client) error {
 		for {

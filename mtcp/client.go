@@ -12,11 +12,15 @@ import (
 
 	"encoding/json"
 
-	"github.com/influx6/faux/metrics"
+	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/internal"
 	uuid "github.com/satori/go.uuid"
+)
+
+var (
+	historySrc = history.FromTag("mtcp-client")
 )
 
 // ConnectOptions defines a function type used to apply given
@@ -27,8 +31,10 @@ type ConnectOptions func(*clientNetwork)
 // client.
 func TLSConfig(config *tls.Config) ConnectOptions {
 	return func(cm *clientNetwork) {
-		cm.secure = true
-		cm.tls = config
+		if config != nil {
+			cm.secure = true
+			cm.tls = config
+		}
 	}
 }
 
@@ -45,14 +51,6 @@ func SecureConnection() ConnectOptions {
 func MaxBuffer(buffer int) ConnectOptions {
 	return func(cm *clientNetwork) {
 		cm.maxWrite = buffer
-	}
-}
-
-// Metrics sets the metrics instance to be used by the client for
-// logging.
-func Metrics(m metrics.Metrics) ConnectOptions {
-	return func(cm *clientNetwork) {
-		cm.metrics = m
 	}
 }
 
@@ -104,10 +102,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.tls.ServerName = host
 	}
 
-	if network.metrics == nil {
-		network.metrics = metrics.New()
-	}
-
 	if network.dialTimeout <= 0 {
 		network.dialTimeout = mnet.DefaultDialTimeout
 	}
@@ -131,12 +125,12 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	network.addr = addr
 	network.parser = new(internal.TaggedMessages)
 
-	c.Metrics = network.metrics
 	c.LiveFunc = network.isLive
 	c.FlushFunc = network.flush
 	c.ReaderFunc = network.read
 	c.WriteFunc = network.write
 	c.CloseFunc = network.close
+	c.BufferedFunc = network.buffered
 	c.HasPendingFunc = network.hasPending
 	c.LocalAddrFunc = network.getLocalAddr
 	c.RemoteAddrFunc = network.getRemoteAddr
@@ -179,7 +173,6 @@ type clientNetwork struct {
 	do         sync.Once
 	tls        *tls.Config
 	worker     sync.WaitGroup
-	metrics    metrics.Metrics
 	dialer     *net.Dialer
 
 	cu   sync.RWMutex
@@ -215,15 +208,6 @@ func (cn *clientNetwork) sendRescue() error {
 }
 
 func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
-	cn.metrics.Emit(
-		metrics.WithID(cn.id),
-		metrics.With("client", cn.id),
-		metrics.With("network", cn.nid),
-		metrics.With("local-addr", cn.localAddr),
-		metrics.With("remote-addr", cn.remoteAddr),
-		metrics.Message("clientNetwork.respondToINFO: Sending CINFO response"),
-	)
-
 	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
 	msg := make([]byte, mnet.SmallestMinBufferSize)
 
@@ -246,13 +230,6 @@ func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 		size, err := lreader.ReadHeader()
 		if err != nil {
 			conn.SetReadDeadline(time.Time{})
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.Message("clientNetwork.respondToINFO: failed to receive mnet.RCINFo req header"),
-			)
 
 			// if its a timeout error then retry if we are not maxed attempts.
 			if netErr, ok := err.(net.Error); ok {
@@ -269,46 +246,49 @@ func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 		conn.SetReadDeadline(time.Time{})
 
 		msg = make([]byte, size)
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+
 		_, err = lreader.Read(msg)
 		if err != nil {
-			conn.SetReadDeadline(time.Time{})
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.Message("clientNetwork.respondToINFO: failed to receive mnet.RCINFo req data"),
-			)
 			return err
 		}
-		conn.SetReadDeadline(time.Time{})
 
 		if !bytes.Equal(msg, cinfoBytes) {
-			cn.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.With("msg", string(msg)),
-				metrics.Message("clientNetwork.respondToCINFO: Invalid mnet.RCINFO prefix"),
-			)
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		break
 	}
 
-	cn.metrics.Emit(
-		metrics.WithID(cn.id),
-		metrics.With("client", cn.id),
-		metrics.With("network", cn.nid),
-		metrics.With("local-addr", cn.localAddr),
-		metrics.With("remote-addr", cn.remoteAddr),
-		metrics.Message("clientNetwork.respondToCINFO: Sending CINFO completed"),
-	)
+	if err := cn.handleCINFO(); err != nil {
+		return err
+	}
 
-	return cn.handleCINFO()
+	for {
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		size, err := lreader.ReadHeader()
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			if err == io.EOF {
+				continue
+			}
+			return err
+		}
+		conn.SetReadDeadline(time.Time{})
+
+		msg = make([]byte, size)
+		_, err = lreader.Read(msg)
+		if err != nil {
+			return err
+		}
+
+		if !bytes.Equal(msg, clientHandshakeCompletedBytes) {
+			return mnet.ErrFailedToCompleteHandshake
+		}
+
+		break
+	}
+
+	return nil
 }
 
 func (cn *clientNetwork) getInfo() mnet.Info {
@@ -373,6 +353,22 @@ func (cn *clientNetwork) hasPending() bool {
 	return cn.buffWriter.Buffered() > 0
 }
 
+func (cn *clientNetwork) buffered() (float64, error) {
+	if err := cn.isLive(); err != nil {
+		return 0, err
+	}
+
+	cn.bu.Lock()
+	defer cn.bu.Unlock()
+	if cn.buffWriter == nil {
+		return 0, mnet.ErrAlreadyClosed
+	}
+
+	available := float64(cn.buffWriter.Available())
+	buffered := float64(cn.buffWriter.Buffered())
+	return buffered / available, nil
+}
+
 func (cn *clientNetwork) flush() error {
 	if err := cn.isLive(); err != nil {
 		return err
@@ -400,17 +396,11 @@ func (cn *clientNetwork) flush() error {
 	err := cn.buffWriter.Flush()
 	if err != nil {
 		conn.SetWriteDeadline(time.Time{})
-		cn.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(cn.id),
-			metrics.With("network", cn.nid),
-			metrics.Message("clientNetwork.flush"),
-		)
 		return err
 	}
 	conn.SetWriteDeadline(time.Time{})
 
-	return err
+	return nil
 }
 
 func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
@@ -483,13 +473,6 @@ func (cn *clientNetwork) read() ([]byte, error) {
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := cn.handleCINFO(); err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.Message("handleCINFO failed"),
-			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -510,13 +493,6 @@ func (cn *clientNetwork) readLoop(conn net.Conn) {
 	for {
 		frame, err := lreader.ReadHeader()
 		if err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("frame", frame),
-				metrics.Message("clientNetwork.readLoop: Connection failed to read data frame"),
-				metrics.With("network", cn.nid),
-			)
 			return
 		}
 
@@ -524,15 +500,6 @@ func (cn *clientNetwork) readLoop(conn net.Conn) {
 
 		n, err := lreader.Read(incoming)
 		if err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("read-length", n),
-				metrics.With("length", len(incoming[:n])),
-				metrics.With("data", string(incoming[:n])),
-				metrics.Message("clientNetwork.readLoop: Connection failed to read: closing"),
-				metrics.With("network", cn.nid),
-			)
 			return
 		}
 
@@ -540,14 +507,6 @@ func (cn *clientNetwork) readLoop(conn net.Conn) {
 
 		// Send into go-routine (critical path)?
 		if err := cn.parser.Parse(incoming[:n]); err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.Message("clientNetwork.readLoop: ParseError"),
-				metrics.With("network", cn.nid),
-				metrics.With("length", len(incoming)),
-				metrics.With("data", string(incoming)),
-			)
 			return
 		}
 	}
@@ -555,20 +514,8 @@ func (cn *clientNetwork) readLoop(conn net.Conn) {
 
 func (cn *clientNetwork) close() error {
 	if err := cn.isLive(); err != nil {
-		cn.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(cn.id),
-			metrics.With("network", cn.nid),
-			metrics.Message("clientNetwork.close: Closed connection"),
-		)
 		return err
 	}
-
-	cn.metrics.Emit(
-		metrics.WithID(cn.id),
-		metrics.With("network", cn.nid),
-		metrics.Message("clientNetwork.close: Closing connection"),
-	)
 
 	cn.flush()
 
@@ -661,25 +608,8 @@ func (cn *clientNetwork) getConn(addr string) (net.Conn, error) {
 	for {
 		conn, err = cn.dialer.Dial("tcp", addr)
 		if err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("addr", addr),
-				metrics.With("network", cn.nid),
-				metrics.With("type", "tcp"),
-				metrics.Message("clientNetwork.getConn: Connection: failed to connect"),
-			)
-
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				if lastSleep >= mnet.MaxTemporarySleep {
-					cn.metrics.Emit(
-						metrics.Error(err),
-						metrics.WithID(cn.id),
-						metrics.With("addr", addr),
-						metrics.With("network", cn.nid),
-						metrics.With("type", "tcp"),
-						metrics.Message("clientNetwork.getConn: Connection: failed to connect, Timeout errors"),
-					)
 					return nil, err
 				}
 
@@ -694,14 +624,6 @@ func (cn *clientNetwork) getConn(addr string) (net.Conn, error) {
 	if cn.secure && cn.tls != nil {
 		tlsConn := tls.Client(conn, cn.tls)
 		if err := tlsConn.Handshake(); err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("addr", addr),
-				metrics.With("network", cn.nid),
-				metrics.With("type", "tcp"),
-				metrics.Message("clientNetwork.getConn: Connection: tls handshake failure"),
-			)
 			return nil, err
 		}
 
@@ -711,14 +633,6 @@ func (cn *clientNetwork) getConn(addr string) (net.Conn, error) {
 	if cn.secure && cn.tls == nil {
 		tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
 		if err := tlsConn.Handshake(); err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("addr", addr),
-				metrics.With("network", cn.nid),
-				metrics.With("type", "tcp"),
-				metrics.Message("clientNetwork.getConn: Connection: tls handshake failure"),
-			)
 			return nil, err
 		}
 

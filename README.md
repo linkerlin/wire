@@ -30,12 +30,6 @@ Mtcp like all Mnet packages are foundation, in that they lay the necessary found
 
 See [MTCP](./mtcp) for more.
 
-### UDP
-
-Mnet provides the [mudp](./mudp) package which implements a lightweight udp server and client implementations with blazing fast data transfers by combining minimal data copy with data buffering techniques. 
-
-Mudp like all Mnet packages are foundation, in that they lay the necessary foundation to transfer at blazing speed without being too opinionated on how you build on top.
-
 ### Websockets
 
 Mnet provides the [msocks](./msocks) package which implements a lightweight websocket server and client implementations with blazing fast data transfers by combining minimal data copy with data buffering techniques. 

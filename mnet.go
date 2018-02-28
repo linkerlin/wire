@@ -7,8 +7,6 @@ import (
 	"math"
 	"net"
 	"time"
-
-	"github.com/influx6/faux/metrics"
 )
 
 // errors ...
@@ -179,6 +177,11 @@ type InfoFunc func() Info
 // StateFunc defines a function type which returns a boolean value for a state.
 type StateFunc func() bool
 
+// PercentageFunc defines a function type returning total current
+// amount of buffered space used up in range of 0.0..1.0, where it represent
+// given percentage of used up buffered space.
+type PercentageFunc func() (float64, error)
+
 // StateFunc defines a function type which returns a boolean value for a state
 // and returns an error as well.
 type StateWithErrorFunc func() (bool, error)
@@ -209,10 +212,10 @@ type Client struct {
 	FlushFunc        ClientFunc
 	IsClusterFunc    StateFunc
 	HasPendingFunc   StateFunc
+	BufferedFunc     PercentageFunc
 	SiblingsFunc     SiblingsFunc
 	StatisticFunc    StatisticsFunc
 	ReconnectionFunc ReconnectionFunc
-	Metrics          metrics.Metrics
 }
 
 // Info returns associated info of giving client.
@@ -231,24 +234,12 @@ func (c Client) Info() Info {
 
 // LocalAddr returns local address associated with given client.
 func (c Client) LocalAddr() (net.Addr, error) {
-	c.Metrics.Emit(
-		metrics.WithID(c.ID),
-		metrics.With("network", c.NID),
-		metrics.Message("Client.LocalAddr"),
-	)
-
 	if c.LocalAddrFunc == nil {
 		return nil, ErrAddrNotProvided
 	}
 
 	addr, err := c.LocalAddrFunc()
 	if err != nil {
-		c.Metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(c.ID),
-			metrics.With("network", c.NID),
-			metrics.Message("Client.LocalAddr"),
-		)
 		return nil, err
 	}
 
@@ -257,24 +248,12 @@ func (c Client) LocalAddr() (net.Addr, error) {
 
 // RemoteAddr returns remote address associated with given client.
 func (c Client) RemoteAddr() (net.Addr, error) {
-	c.Metrics.Emit(
-		metrics.WithID(c.ID),
-		metrics.With("network", c.NID),
-		metrics.Message("Client.RemoteAddr"),
-	)
-
 	if c.RemoteAddrFunc == nil {
 		return nil, ErrAddrNotProvided
 	}
 
 	addr, err := c.RemoteAddrFunc()
 	if err != nil {
-		c.Metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(c.ID),
-			metrics.With("network", c.NID),
-			metrics.Message("Client.RemoteAddr"),
-		)
 		return nil, err
 	}
 
@@ -303,25 +282,24 @@ func (c Client) HasPending() bool {
 	return c.HasPendingFunc()
 }
 
+// Buffered returns the percentage in decimal of (0.0...1.0) representing
+// possible used buffered space of giving buffered writer size.
+func (c Client) Buffered() (float64, error) {
+	if c.BufferedFunc == nil {
+		return 0, ErrNotSupported
+	}
+
+	return c.BufferedFunc()
+}
+
 // Live returns an error if client is not currently live or connected to
 // network. Allows to know current status of client.
 func (c Client) Live() error {
-	c.Metrics.Emit(
-		metrics.WithID(c.ID),
-		metrics.Message("Client.Live"),
-		metrics.With("network", c.NID),
-	)
 	if c.LiveFunc == nil {
 		return ErrLiveCheckNotAllowed
 	}
 
 	if err := c.LiveFunc(); err != nil {
-		c.Metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(c.ID),
-			metrics.Message("Client.Live"),
-			metrics.With("network", c.NID),
-		)
 		return err
 	}
 
@@ -332,24 +310,11 @@ func (c Client) Live() error {
 // Also allows provision of alternate address to reconnect with.
 // NOTE: Not all may implement this has it's optional.
 func (c Client) Reconnect(altAddr string) error {
-	c.Metrics.Emit(
-		metrics.WithID(c.ID),
-		metrics.Message("Client.Reconnect"),
-		metrics.With("network", c.NID),
-		metrics.With("alternate_addr", altAddr),
-	)
 	if c.ReconnectionFunc == nil {
 		return ErrClientReconnectionUnavailable
 	}
 
 	if err := c.ReconnectionFunc(altAddr); err != nil {
-		c.Metrics.Emit(
-			metrics.WithID(c.ID),
-			metrics.Message("Client.Reconnect"),
-			metrics.Error(err),
-			metrics.With("alternate_addr", altAddr),
-			metrics.With("network", c.NID),
-		)
 		return err
 	}
 
@@ -367,11 +332,10 @@ func (c Client) Reconnect(altAddr string) error {
 //
 // Internal Package: (see github.com/influx6/mnet/blob/master/internal)
 func (c Client) Read() ([]byte, error) {
-	if c.ReaderFunc == nil {
-		return nil, ErrReadNotAllowed
+	if c.ReaderFunc != nil {
+		return c.ReaderFunc()
 	}
-
-	return c.ReaderFunc()
+	return nil, ErrReadNotAllowed
 }
 
 // Write returns a writer to writes provided data of specified size into
@@ -381,11 +345,10 @@ func (c Client) Read() ([]byte, error) {
 // which allows streaming very large data in chunk size that are then collected and
 // built together on the receiver side.
 func (c Client) Write(toWriteSize int) (io.WriteCloser, error) {
-	if c.WriteFunc == nil {
-		return nil, ErrWriteNotAllowed
+	if c.WriteFunc != nil {
+		return c.WriteFunc(toWriteSize)
 	}
-
-	return c.WriteFunc(toWriteSize)
+	return nil, ErrWriteNotAllowed
 }
 
 // Flush sends all accumulated message within clients buffer into
@@ -400,12 +363,6 @@ func (c Client) Flush() error {
 
 // Statistics returns statistics associated with client.j
 func (c Client) Statistics() (ClientStatistic, error) {
-	c.Metrics.Emit(
-		metrics.WithID(c.ID),
-		metrics.Message("Client.Statistics"),
-		metrics.With("network", c.NID),
-	)
-
 	if c.StatisticFunc == nil {
 		return ClientStatistic{}, ErrStatisticsNotProvided
 	}
@@ -415,23 +372,11 @@ func (c Client) Statistics() (ClientStatistic, error) {
 
 // Close closes the underline client connection.
 func (c Client) Close() error {
-	c.Metrics.Emit(
-		metrics.WithID(c.ID),
-		metrics.Message("Client.Close"),
-		metrics.With("network", c.NID),
-	)
-
 	if c.CloseFunc == nil {
 		return ErrCloseNotAllowed
 	}
 
 	if err := c.CloseFunc(); err != nil {
-		c.Metrics.Emit(
-			metrics.WithID(c.ID),
-			metrics.Message("Client.Close"),
-			metrics.Error(err),
-			metrics.With("network", c.NID),
-		)
 		return err
 	}
 
@@ -444,12 +389,6 @@ func (c Client) Close() error {
 // exists, to avoid conflict of internal behaviour. More so, only the
 // server client handler should ever have access to Read/ReadFrom methods.
 func (c Client) Others() ([]Client, error) {
-	defer c.Metrics.Emit(
-		metrics.WithID(c.ID),
-		metrics.Message("Client.Others"),
-		metrics.With("network", c.NID),
-	)
-
 	if c.SiblingsFunc == nil {
 		return nil, ErrSiblingsNotAllowed
 	}

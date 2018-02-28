@@ -8,15 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"context"
 
-	"github.com/influx6/faux/metrics"
-	"github.com/influx6/faux/metrics/custom"
 	"github.com/influx6/faux/tests"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/certificates"
@@ -24,19 +21,10 @@ import (
 )
 
 var (
-	events metrics.Metrics
 	dialer = &net.Dialer{Timeout: 2 * time.Second}
 )
 
-func initMetrics() {
-	if testing.Verbose() {
-		events = metrics.New(custom.StackDisplay(os.Stderr))
-	}
-}
-
 func TestNetwork_Add(t *testing.T) {
-	initMetrics()
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	netw, err := createNewNetwork(ctx, "localhost:4050", nil)
@@ -57,7 +45,7 @@ func TestNetwork_Add(t *testing.T) {
 	}
 	tests.Passed("Should have successfully added net.Conn to network")
 
-	client, err := mtcp.Connect("localhost:7050", mtcp.Metrics(events))
+	client, err := mtcp.Connect("localhost:7050")
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully connected to network")
 	}
@@ -120,8 +108,6 @@ func TestNetwork_Add(t *testing.T) {
 }
 
 func TestNetwork_ClusterConnect(t *testing.T) {
-	initMetrics()
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	netw, err := createNewNetwork(ctx, "localhost:4050", nil)
@@ -225,7 +211,6 @@ func createTLSCA() (ca certificates.CertificateAuthority, server, client certifi
 func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.TCPNetwork, error) {
 	var netw mtcp.TCPNetwork
 	netw.Addr = addr
-	netw.Metrics = events
 	netw.TLS = config
 
 	netw.Handler = func(client mnet.Client) error {
@@ -285,7 +270,6 @@ func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mt
 func createInfoNetwork(ctx context.Context, addr string, config *tls.Config) (*mtcp.TCPNetwork, error) {
 	var netw mtcp.TCPNetwork
 	netw.Addr = addr
-	netw.Metrics = events
 	netw.TLS = config
 
 	netw.Handler = func(client mnet.Client) error {

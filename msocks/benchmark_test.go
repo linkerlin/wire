@@ -112,7 +112,6 @@ func benchThis(b *testing.B, payload []byte) {
 	netw.MaxWriteSize = defaultClientSize
 
 	client, err := msocks.Connect(chosenAddr,
-		msocks.Metrics(events),
 		msocks.MaxBuffer(defaultClientSize),
 	)
 
@@ -142,7 +141,6 @@ func benchThis(b *testing.B, payload []byte) {
 func createBenchmarkNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwork, error) {
 	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
-	netw.Metrics = events
 	netw.Handler = func(client mnet.Client) error {
 		for {
 			_, err := client.Read()

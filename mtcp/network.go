@@ -16,7 +16,7 @@ import (
 
 	"encoding/json"
 
-	"github.com/influx6/faux/metrics"
+	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/melon"
 	"github.com/influx6/mnet"
@@ -26,11 +26,13 @@ import (
 )
 
 var (
-	cinfoBytes              = []byte(mnet.CINFO)
-	rinfoBytes              = []byte(mnet.RINFO)
-	clStatusBytes           = []byte(mnet.CLSTATUS)
-	rescueBytes             = []byte(mnet.CRESCUE)
-	handshakeCompletedBytes = []byte(mnet.CLHANDSHAKECOMPLETED)
+	cinfoBytes                    = []byte(mnet.CINFO)
+	rinfoBytes                    = []byte(mnet.RINFO)
+	clStatusBytes                 = []byte(mnet.CLSTATUS)
+	rescueBytes                   = []byte(mnet.CRESCUE)
+	handshakeCompletedBytes       = []byte(mnet.CLHANDSHAKECOMPLETED)
+	clientHandshakeCompletedBytes = []byte(mnet.ClientHandShakeCompleted)
+	serverSrc                     = history.FromTag("mtcp-server")
 )
 
 //************************************************************************
@@ -45,8 +47,8 @@ type tcpServerClient struct {
 	localAddr  net.Addr
 	remoteAddr net.Addr
 	srcInfo    *mnet.Info
+	logs       history.Ctx
 	network    *TCPNetwork
-	metrics    metrics.Metrics
 	worker     sync.WaitGroup
 	do         sync.Once
 
@@ -111,6 +113,23 @@ func (nc *tcpServerClient) hasPending() bool {
 	return nc.buffWriter.Buffered() > 0
 }
 
+func (nc *tcpServerClient) buffered() (float64, error) {
+	if err := nc.isLive(); err != nil {
+		return 0, err
+	}
+
+	nc.bu.Lock()
+	defer nc.bu.Unlock()
+
+	if nc.buffWriter == nil {
+		return 0, mnet.ErrAlreadyClosed
+	}
+
+	available := float64(nc.buffWriter.Available())
+	buffered := float64(nc.buffWriter.Buffered())
+	return buffered / available, nil
+}
+
 func (nc *tcpServerClient) flush() error {
 	if err := nc.isLive(); err != nil {
 		return err
@@ -158,15 +177,12 @@ func (nc *tcpServerClient) read() ([]byte, error) {
 
 	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
 
+	if bytes.HasPrefix(indata, clientHandshakeCompletedBytes) {
+		return nil, mnet.ErrNoDataYet
+	}
+
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := nc.handleCINFO(); err != nil {
-			nc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.Message("handleCINFO failed"),
-			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -174,13 +190,6 @@ func (nc *tcpServerClient) read() ([]byte, error) {
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
 		if err := nc.handleCLStatusReceive(indata); err != nil {
-			nc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.Message("handleCLStatusRecieve failed"),
-			)
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -305,87 +314,57 @@ func (nc *tcpServerClient) handleRINFO(data []byte) error {
 	return nil
 }
 
-func (nc *tcpServerClient) sendCINFOReq() error {
-	// Send to new client mnet.CINFO request
-	wc, err := nc.write(len(cinfoBytes))
+func (nc *tcpServerClient) sendCLHSCompleted() error {
+	wc, err := nc.write(len(clientHandshakeCompletedBytes))
 	if err != nil {
-		nc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(nc.id),
-			metrics.With("client", nc.id),
-			metrics.With("network", nc.nid),
-			metrics.Message("tcpServerClient.Handshake: failed to send CINFO req"),
-		)
 		return err
 	}
 
-	if _, err := wc.Write(cinfoBytes); err != nil {
-		nc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(nc.id),
-			metrics.With("client", nc.id),
-			metrics.With("network", nc.nid),
-			metrics.Message("tcpServerClient.Handshake: failed to send CINFO req"),
-		)
+	if _, err := wc.Write(clientHandshakeCompletedBytes); err != nil {
 		return err
 	}
 
 	if err := wc.Close(); err != nil {
-		nc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(nc.id),
-			metrics.With("client", nc.id),
-			metrics.With("network", nc.nid),
-			metrics.Message("tcpServerClient.Handshake: failed to send CINFO req"),
-		)
 		return err
 	}
 
 	if err := nc.flush(); err != nil {
-		nc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(nc.id),
-			metrics.With("client", nc.id),
-			metrics.With("network", nc.nid),
-			metrics.Message("tcpServerClient.Handshake: failed to flush CINFO req"),
-		)
 		return err
 	}
 
-	nc.metrics.Emit(
-		metrics.WithID(nc.id),
-		metrics.With("client", nc.id),
-		metrics.With("network", nc.nid),
-		metrics.Message("tcpServerClient.Handshake: Sent CINFO req"),
-	)
+	return nil
+}
+
+func (nc *tcpServerClient) sendCINFOReq() error {
+	wc, err := nc.write(len(cinfoBytes))
+	if err != nil {
+		return err
+	}
+
+	if _, err := wc.Write(cinfoBytes); err != nil {
+		return err
+	}
+
+	if err := wc.Close(); err != nil {
+		return err
+	}
+
+	if err := nc.flush(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (nc *tcpServerClient) handshake() error {
-	// Send to new client mnet.CINFO request
-	nc.metrics.Emit(
-		metrics.WithID(nc.id),
-		metrics.With("client", nc.id),
-		metrics.With("network", nc.nid),
-		metrics.With("local-addr", nc.localAddr),
-		metrics.With("remote-addr", nc.remoteAddr),
-		metrics.With("server-addr", nc.serverAddr),
-		metrics.Message("tcpServerClient.Handshake"),
-	)
+	logs := nc.logs.FromTitle("tcpServerClient.handshake")
+	defer logs.Done()
 
 	if err := nc.sendCINFOReq(); err != nil {
+		logs.Error(err, "error sending CINFO request")
+		logs.Red("Failed to send CINFO request")
 		return err
 	}
-
-	nc.metrics.Emit(
-		metrics.WithID(nc.id),
-		metrics.With("client", nc.id),
-		metrics.With("network", nc.nid),
-		metrics.With("local-addr", nc.localAddr),
-		metrics.With("remote-addr", nc.remoteAddr),
-		metrics.With("server-addr", nc.serverAddr),
-		metrics.Message("tcpServerClient.Handshake: Awating CINFO response"),
-	)
 
 	before := time.Now()
 
@@ -394,47 +373,24 @@ func (nc *tcpServerClient) handshake() error {
 		msg, err := nc.read()
 		if err != nil {
 			if err != mnet.ErrNoDataYet {
-				nc.metrics.Emit(
-					metrics.Error(err),
-					metrics.WithID(nc.id),
-					metrics.With("client", nc.id),
-					metrics.With("network", nc.nid),
-					metrics.Message("tcpServerClient.Handshake: HandShake failed"),
-				)
 				return err
 			}
 
 			if time.Now().Sub(before) > mnet.MaxInfoWait {
 				nc.closeConn()
-				nc.metrics.Emit(
-					metrics.Error(mnet.ErrFailedToRecieveInfo),
-					metrics.WithID(nc.id),
-					metrics.With("client", nc.id),
-					metrics.With("network", nc.nid),
-					metrics.Message("tcpServerClient.Handshake: Timeout: awaiting mnet.RCINFo data"),
-				)
+				logs.Error(mnet.ErrFailedToRecieveInfo, "read timeout")
+				logs.Red("read timeout")
 				return mnet.ErrFailedToRecieveInfo
 			}
 			continue
 		}
 
-		nc.metrics.Emit(
-			metrics.WithID(nc.id),
-			metrics.With("client", nc.id),
-			metrics.With("network", nc.nid),
-			metrics.With("message", string(msg)),
-			metrics.Message("tcpServerClient.Handshake: Message received"),
-		)
-
 		// if we get a rescue signal, then client never got our CINFO request, so resent.
 		if bytes.Equal(msg, rescueBytes) {
-			nc.metrics.Emit(
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.Message("tcpServerClient.Handshake: HandShake Rescue received"),
-			)
+			logs.Info("received rescue request")
 			if err := nc.sendCINFOReq(); err != nil {
+				logs.Error(err, "failed to send CINFO after rescue request")
+				logs.Red("send error with CINFO after rescue")
 				return err
 			}
 
@@ -446,53 +402,26 @@ func (nc *tcpServerClient) handshake() error {
 		// First message should be a mnet.RCINFO response.
 		if !bytes.HasPrefix(msg, rinfoBytes) {
 			nc.closeConn()
-			nc.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.With("data", string(msg)),
-				metrics.Message("tcpServerClient.Handshake: Invalid mnet.RCINFO prefix"),
-			)
+			logs.Error(mnet.ErrFailedToRecieveInfo, "failed to receive RCINFO response")
+			logs.Red("failed handshake at RCINFO response")
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		if err := nc.handleRINFO(msg); err != nil {
-			nc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.With("data", string(msg)),
-				metrics.Message("tcpServerClient.Handshake: Invalid mnet.RCINFO data"),
-			)
+			logs.Error(err, "failed to process RCINFO response")
+			logs.Red("failed handshake at RCINFO response process")
 			return err
 		}
 
 		break
 	}
 
-	nc.metrics.Emit(
-		metrics.WithID(nc.id),
-		metrics.With("client", nc.id),
-		metrics.With("network", nc.nid),
-		metrics.With("local-addr", nc.localAddr),
-		metrics.With("remote-addr", nc.remoteAddr),
-		metrics.With("server-addr", nc.serverAddr),
-		metrics.Message("tcpServerClient.Handshake: Send Cluster Status Message"),
-	)
-
 	// if its a cluster send Cluster Status message.
 	if nc.isACluster {
-
+		logs.Info("client cluster handshake agreement processing")
 		if err := nc.handleCLStatusSend(); err != nil {
-			nc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.Message("tcpServerClient.Handshake: HandShake send CLSTATUS failed"),
-			)
+			logs.Error(err, "failed to send CLStatus message")
+			logs.Red("failed handshake at CLStatus message")
 			return err
 		}
 
@@ -503,55 +432,23 @@ func (nc *tcpServerClient) handshake() error {
 			msg, err := nc.read()
 			if err != nil {
 				if err != mnet.ErrNoDataYet {
-					nc.metrics.Emit(
-						metrics.Error(err),
-						metrics.WithID(nc.id),
-						metrics.With("client", nc.id),
-						metrics.With("network", nc.nid),
-						metrics.Message("tcpServerClient.Handshake: HandShake failed"),
-					)
 					return err
 				}
 
 				if time.Now().Sub(before) > mnet.MaxInfoWait {
 					nc.closeConn()
-					nc.metrics.Emit(
-						metrics.Error(mnet.ErrFailedToCompleteHandshake),
-						metrics.WithID(nc.id),
-						metrics.With("client", nc.id),
-						metrics.With("network", nc.nid),
-						metrics.Message("tcpServerClient.Handshake: Failed to receive handshake completion before max wait"),
-					)
+					logs.Error(mnet.ErrFailedToCompleteHandshake, "response timeout")
+					logs.Red("failed to complete handshake")
 					return mnet.ErrFailedToCompleteHandshake
 				}
 				continue
 			}
 
-			nc.metrics.Emit(
-				metrics.WithID(nc.id),
-				metrics.With("client", nc.id),
-				metrics.With("network", nc.nid),
-				metrics.With("message", string(msg)),
-				metrics.Message("tcpServerClient.Handshake: Message received"),
-			)
-
 			// if we get a rescue signal, then client never got our CLStatus response, so resend.
 			if bytes.Equal(msg, rescueBytes) {
-				nc.metrics.Emit(
-					metrics.WithID(nc.id),
-					metrics.With("client", nc.id),
-					metrics.With("network", nc.nid),
-					metrics.Message("tcpServerClient.Handshake: HandShake Rescue received"),
-				)
-
 				if err := nc.handleCLStatusSend(); err != nil {
-					nc.metrics.Emit(
-						metrics.Error(err),
-						metrics.WithID(nc.id),
-						metrics.With("client", nc.id),
-						metrics.With("network", nc.nid),
-						metrics.Message("tcpServerClient.Handshake: HandShake Rescue send CLSTATUS failed"),
-					)
+					logs.Error(err, "failed to send CLStatus response message")
+					logs.Red("failed to complete handshake at CLStatus")
 					return err
 				}
 
@@ -561,30 +458,22 @@ func (nc *tcpServerClient) handshake() error {
 			}
 
 			if !bytes.Equal(msg, handshakeCompletedBytes) {
-				nc.metrics.Emit(
-					metrics.Error(mnet.ErrFailedToCompleteHandshake),
-					metrics.WithID(nc.id),
-					metrics.With("client", nc.id),
-					metrics.With("network", nc.nid),
-					metrics.With("data", string(msg)),
-					metrics.Message("tcpServerClient.Handshake: Invalid handshake completion data"),
-				)
+				logs.Error(mnet.ErrFailedToCompleteHandshake, "failed to received handshake completion")
+				logs.Red("failed to complete handshake at completion signal")
 				return mnet.ErrFailedToCompleteHandshake
 			}
 
 			break
 		}
+	} else {
+		if err := nc.sendCLHSCompleted(); err != nil {
+			logs.Error(err, "failed to deliver CLHS handshake completion signal")
+			logs.Red("failed non-cluster handshake completion")
+			return err
+		}
 	}
 
-	nc.metrics.Emit(
-		metrics.WithID(nc.id),
-		metrics.With("client", nc.id),
-		metrics.With("network", nc.nid),
-		metrics.With("local-addr", nc.localAddr),
-		metrics.With("remote-addr", nc.remoteAddr),
-		metrics.With("server-addr", nc.serverAddr),
-		metrics.Message("tcpServerClient.Handshake: Completed"),
-	)
+	logs.Info("handshake completed")
 
 	return nil
 }
@@ -650,12 +539,6 @@ func (nc *tcpServerClient) closeConnection() error {
 		return err
 	}
 
-	defer nc.metrics.Emit(
-		metrics.WithID(nc.id),
-		metrics.With("network", nc.nid),
-		metrics.Message("tcpServerClient.closeConnection"),
-	)
-
 	atomic.StoreInt64(&nc.closed, 1)
 
 	nc.flush()
@@ -715,28 +598,12 @@ func (nc *tcpServerClient) readLoop() {
 	for {
 		frame, err := lreader.ReadHeader()
 		if err != nil {
-			nc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.With("frame", frame),
-				metrics.Message("Connection failed to read header frame"),
-				metrics.With("network", nc.nid),
-			)
 			return
 		}
 
 		incoming = make([]byte, frame)
 		n, err := lreader.Read(incoming)
 		if err != nil {
-			nc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.With("read-length", n),
-				metrics.With("length", len(incoming[:n])),
-				metrics.With("data", string(incoming[:n])),
-				metrics.Message("Connection failed to read: closing"),
-				metrics.With("network", nc.nid),
-			)
 			return
 		}
 
@@ -744,14 +611,6 @@ func (nc *tcpServerClient) readLoop() {
 
 		// Send into go-routine (critical path)?
 		if err := nc.parser.Parse(incoming[:n]); err != nil {
-			nc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.Message("ParseError"),
-				metrics.With("network", nc.nid),
-				metrics.With("length", len(incoming)),
-				metrics.With("data", string(incoming)),
-			)
 			return
 		}
 
@@ -773,7 +632,6 @@ type TCPNetwork struct {
 	ServerName string
 	TLS        *tls.Config
 	Handler    mnet.ConnHandler
-	Metrics    metrics.Metrics
 
 	totalClients int64
 	totalClosed  int64
@@ -809,6 +667,7 @@ type TCPNetwork struct {
 	// till flush must not exceed else will not be buffered and will be written directly.
 	MaxWriteSize int
 
+	logs   history.Ctx
 	ctx    context.Context
 	cancel func()
 
@@ -834,10 +693,6 @@ func (n *TCPNetwork) Close() error {
 
 // Start initializes the network listener.
 func (n *TCPNetwork) Start(ctx context.Context) error {
-	if n.Metrics == nil {
-		n.Metrics = metrics.New()
-	}
-
 	n.ctx, n.cancel = context.WithCancel(ctx)
 
 	if n.ID == "" {
@@ -849,14 +704,6 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 		host, _, _ := net.SplitHostPort(n.Addr)
 		n.ServerName = host
 	}
-
-	defer n.Metrics.Emit(
-		metrics.Message("TCPNetwork.Start"),
-		metrics.With("network", n.ID),
-		metrics.With("addr", n.Addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.WithID(n.ID),
-	)
 
 	if n.Dialer == nil {
 		n.Dialer = &net.Dialer{Timeout: mnet.DefaultDialTimeout}
@@ -874,6 +721,10 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	n.raddr = stream.Addr()
 	n.pool = make(chan func(), 0)
 	n.clients = make(map[string]*tcpServerClient)
+
+	n.logs = serverSrc.With("network-id", n.ID).
+		With("serverName", n.ServerName).
+		With("addr", n.Addr)
 
 	if n.MaxWriteSize <= 0 {
 		n.MaxWriteSize = mnet.MaxBufferSize
@@ -905,18 +756,18 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 func (n *TCPNetwork) registerCluster(clusters []mnet.Info) {
 	for _, cluster := range clusters {
 		if err := n.AddCluster(cluster.ServerAddr); err != nil {
-			n.Metrics.Send(metrics.Entry{
-				ID:      n.ID,
-				Level:   metrics.ErrorLvl,
-				Field:   metrics.Field{"info": cluster, "nid": n.ID, "error": err},
-				Message: "Failed to add cluster addresss",
-			})
+			n.logs.FromTitle("WebsocketNetwork.registerClusters").
+				With("info", cluster).
+				Error(err, "failed to add cluster address").Done()
 		}
 	}
 }
 
 func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
+
+	logs := n.logs.FromTitle("TCPNetwork.handleClose")
+	defer logs.Done()
 
 	<-ctx.Done()
 
@@ -929,14 +780,8 @@ func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWrite
 	n.cu.RUnlock()
 
 	if err := stream.Close(); err != nil {
-		n.Metrics.Emit(
-			metrics.Error(err),
-			metrics.Message("TCPNetwork.endLogic"),
-			metrics.With("network", n.ID),
-			metrics.With("addr", n.Addr),
-			metrics.With("serverName", n.ServerName),
-			metrics.WithID(n.ID),
-		)
+		logs.Error(err, "closing listener")
+		logs.Red("network listener closed")
 	}
 
 	if n.Hook != nil {
@@ -974,11 +819,11 @@ func (n *TCPNetwork) getOtherClients(cid string) ([]mnet.Client, error) {
 		var client mnet.Client
 		client.NID = n.ID
 		client.ID = conn.id
-		client.Metrics = n.Metrics
-		client.LiveFunc = conn.isLive
-		client.InfoFunc = conn.getInfo
 		client.FlushFunc = conn.flush
+		client.LiveFunc = conn.isLive
 		client.WriteFunc = conn.write
+		client.InfoFunc = conn.getInfo
+		client.BufferedFunc = conn.buffered
 		client.IsClusterFunc = conn.isCluster
 		client.HasPendingFunc = conn.hasPending
 		client.StatisticFunc = conn.getStatistics
@@ -1003,15 +848,6 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 	}
 
 	if n.connectedToMeByAddr(addr) {
-		n.Metrics.Emit(
-			metrics.Error(mnet.ErrAlreadyServiced),
-			metrics.WithID(n.ID),
-			metrics.With("network", n.ID),
-			metrics.With("addr", n.Addr),
-			metrics.With("target", addr),
-			metrics.With("serverName", n.ServerName),
-			metrics.Message("TCPNetwork.AddCluster: cluster already exists"),
-		)
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -1025,29 +861,11 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 	}
 
 	if err != nil {
-		n.Metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(n.ID),
-			metrics.With("network", n.ID),
-			metrics.With("addr", n.Addr),
-			metrics.With("target", addr),
-			metrics.With("serverName", n.ServerName),
-			metrics.Message("TCPNetwork.AddCluster: unable to dial network"),
-		)
 		return err
 	}
 
 	if n.connectedToMeByAddr(conn.RemoteAddr().String()) {
 		conn.Close()
-		n.Metrics.Emit(
-			metrics.Error(mnet.ErrAlreadyServiced),
-			metrics.WithID(n.ID),
-			metrics.With("network", n.ID),
-			metrics.With("addr", n.Addr),
-			metrics.With("target", addr),
-			metrics.With("serverName", n.ServerName),
-			metrics.Message("TCPNetwork.AddCluster: cluster already exists"),
-		)
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -1055,40 +873,10 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 		return n.AddCluster(addr)
 	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
 
-	n.Metrics.Emit(
-		metrics.WithID(n.ID),
-		metrics.With("network", n.ID),
-		metrics.With("addr", n.Addr),
-		metrics.With("target", addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.Message("TCPNetwork.AddCluster: Cluster net.Conn acheived"),
-	)
-
 	if err := n.addClient(conn, policy, true); err != nil {
 		conn.Close()
-		n.Metrics.Send(metrics.Entry{
-			ID:      n.ID,
-			Level:   metrics.ErrorLvl,
-			Message: "Failed to add new connection",
-			Field: metrics.Field{
-				"err":         err,
-				"remote_addr": conn.RemoteAddr(),
-				"local_addr":  conn.LocalAddr(),
-			},
-		})
 		return err
 	}
-
-	n.Metrics.Send(metrics.Entry{
-		ID:      n.ID,
-		Level:   metrics.InfoLvl,
-		Message: "Added new cluster connection",
-		Field: metrics.Field{
-			"err":         err,
-			"remote_addr": conn.RemoteAddr(),
-			"local_addr":  conn.LocalAddr(),
-		},
-	})
 
 	return nil
 }
@@ -1137,28 +925,15 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	id := uuid.NewV4().String()
 
 	client := mnet.Client{
-		ID:      id,
-		NID:     n.ID,
-		Metrics: n.Metrics,
+		ID:  id,
+		NID: n.ID,
 	}
-
-	n.Metrics.Emit(
-		metrics.WithID(n.ID),
-		metrics.With("network", n.ID),
-		metrics.With("client_id", id),
-		metrics.With("network-addr", n.Addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.Info("New Client Connection"),
-		metrics.With("local_addr", conn.LocalAddr()),
-		metrics.With("remote_addr", conn.RemoteAddr()),
-	)
 
 	nc := new(tcpServerClient)
 	nc.id = id
 	nc.nid = n.ID
 	nc.conn = conn
 	nc.network = n
-	nc.metrics = n.Metrics
 	nc.serverAddr = n.raddr
 	nc.isACluster = isCluster
 	nc.localAddr = conn.LocalAddr()
@@ -1168,12 +943,21 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	nc.parser = new(internal.TaggedMessages)
 	nc.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
 
+	nc.logs = n.logs.FromFields(map[string]interface{}{
+		"server-addr": n.raddr,
+		"client-id":   nc.id,
+		"server-id":   nc.nid,
+		"localAddr":   conn.LocalAddr(),
+		"remoteAddr":  conn.RemoteAddr(),
+	})
+
 	client.LiveFunc = nc.isLive
 	client.InfoFunc = nc.getInfo
 	client.ReaderFunc = nc.read
 	client.WriteFunc = nc.write
 	client.FlushFunc = nc.flush
 	client.CloseFunc = nc.closeConn
+	client.BufferedFunc = nc.buffered
 	client.IsClusterFunc = nc.isCluster
 	client.HasPendingFunc = nc.hasPending
 	client.LocalAddrFunc = nc.getLocalAddr
@@ -1197,15 +981,8 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	atomic.AddInt64(&n.totalClients, 1)
 	go func() {
 		if err := n.Handler(client); err != nil {
+			nc.logs.Error(err, "Client connection handler failed")
 			nc.closeConnection()
-
-			n.Metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(nc.id),
-				metrics.With("network", n.ID),
-				metrics.With("addr", nc.remoteAddr),
-				metrics.Message("Connection Handler encountered error"),
-			)
 		}
 
 		n.cu.Lock()
@@ -1223,13 +1000,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 		if policy != nil {
 			go func() {
 				if err := policy.Retry(); err != nil {
-					n.Metrics.Emit(
-						metrics.Error(err),
-						metrics.WithID(nc.id),
-						metrics.With("network", n.ID),
-						metrics.With("addr", nc.remoteAddr),
-						metrics.Message("RetryPolicy failed"),
-					)
+					n.logs.Error(err, "Client retry failed").Done()
 				}
 			}()
 		}
@@ -1262,25 +1033,11 @@ func (n *TCPNetwork) Addrs() net.Addr {
 func (n *TCPNetwork) runStream(stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
 
-	defer n.Metrics.Emit(
-		metrics.With("network", n.ID),
-		metrics.Message("TCPNetwork.runStream"),
-		metrics.With("addr", n.Addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.WithID(n.ID),
-	)
-
 	initial := mnet.MinTemporarySleep
 
 	for {
 		newConn, err := stream.ReadConn()
 		if err != nil {
-			n.Metrics.Send(metrics.Entry{
-				ID:      n.ID,
-				Field:   metrics.Field{"err": err},
-				Message: "Failed to read connection",
-			})
-
 			if err == mlisten.ErrListenerClosed {
 				return
 			}

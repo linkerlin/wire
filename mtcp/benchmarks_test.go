@@ -113,7 +113,7 @@ func benchThis(b *testing.B, payload []byte) {
 
 	netw.MaxWriteSize = defaultClientSize
 
-	client, err := mtcp.Connect(chosenAddr, mtcp.Metrics(events), mtcp.MaxBuffer(defaultClientSize))
+	client, err := mtcp.Connect(chosenAddr, mtcp.MaxBuffer(defaultClientSize))
 	if err != nil {
 		b.Fatalf("Failed to dial network %+q", err)
 		return
@@ -141,7 +141,6 @@ func createBenchmarkNetwork(ctx context.Context, addr string, config *tls.Config
 	var netw mtcp.TCPNetwork
 	netw.Addr = addr
 	netw.TLS = config
-	netw.Metrics = events
 	netw.MaxWriteSize = size
 
 	netw.Handler = func(client mnet.Client) error {

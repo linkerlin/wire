@@ -21,6 +21,9 @@ const (
 	// MaxReadDeadline sets the maximum read deadline for reading from a net.Conn.
 	MaxReadDeadline = 5 * time.Second
 
+	// MaxIdleTime sets the maximum time a connection should be idle for a udp client.
+	MaxIdleTime = 1 * time.Minute
+
 	// MaxInfoWait sets the default duration to wait for arrival of connection info else
 	// closing the connection.
 	MaxInfoWait = time.Second * 10
@@ -80,6 +83,10 @@ const (
 	// CLSTATUS defines a action key for responding with cluster status info.
 	CLSTATUS = "MNET:CLSTATUS "
 
+	// ClientHandshakeCompleted defines a action key for responding with a handshake completed
+	// to a client connection.
+	ClientHandShakeCompleted = "MNET:Handshake:CL:CMT"
+
 	// CLHandshake defines a action key for responding with a handshake completed.
-	CLHANDSHAKECOMPLETED = "MNET:Handshake:Completed"
+	CLHANDSHAKECOMPLETED = "MNET:Handshake:CMT"
 )

@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/binary"
 	"io"
 	"sync"
@@ -27,7 +28,7 @@ var (
 		},
 	}
 
-	bytespool = pbytes.NewBytesPool(218, 20)
+	bytespool = pbytes.NewBytesPool(128, 30)
 )
 
 //**********************************************************************
@@ -42,8 +43,8 @@ type LengthWriter struct {
 	max  int
 	ty   int
 	area []byte
-	buff []byte
 	w    io.Writer
+	buff *bytes.Buffer
 }
 
 // NewLengthWriter returns a new instance of a LengthWriter which
@@ -62,12 +63,15 @@ func NewLengthWriter(w io.Writer, size int, dataLength int) *LengthWriter {
 		area = bit8Pool.Get().([]byte)
 	}
 
+	buff := bytespool.Get(dataLength)
+	buff.Truncate(0)
+
 	return &LengthWriter{
 		w:    w,
 		ty:   size,
 		max:  dataLength,
 		area: area,
-		buff: bytespool.Get(dataLength),
+		buff: buff,
 	}
 }
 
@@ -84,12 +88,15 @@ func (lw *LengthWriter) Reset(w io.Writer, size int, dataLength int) {
 		area = bit8Pool.Get().([]byte)
 	}
 
+	buff := bytespool.Get(dataLength)
+	buff.Truncate(0)
+
 	lw.n = 0
 	lw.w = w
 	lw.ty = size
 	lw.area = area
 	lw.max = dataLength
-	lw.buff = bytespool.Get(dataLength)
+	lw.buff = buff
 }
 
 // Close closes this writer and flushes data into underline writer.
@@ -135,17 +142,19 @@ func (lw *LengthWriter) Close() error {
 
 	lw.area = nil
 
-	dataW, err := lw.w.Write(lw.buff[0:lw.n])
+	//lw.buff.Truncate(lw.n)
+	dataW, err := lw.w.Write(lw.buff.Bytes()[:lw.n])
 	if err != nil {
 		return err
 	}
 
+	lw.buff.Truncate(lw.max)
 	bytespool.Put(lw.buff)
 
 	lw.w = nil
 	lw.buff = nil
 
-	if sizeW+dataW != lw.max+lw.ty {
+	if sizeW+int(dataW) != lw.max+lw.ty {
 		return io.ErrShortWrite
 	}
 
@@ -161,7 +170,12 @@ func (lw *LengthWriter) Write(d []byte) (int, error) {
 		return 0, ErrLimitExceeded
 	}
 
-	n := copy(lw.buff[lw.n:lw.max], d)
+	//n := copy(lw.buff[lw.n:lw.max], d)
+	n, err := lw.buff.Write(d)
+	if err != nil {
+		return n, err
+	}
+
 	lw.n += n
 	return n, nil
 }
@@ -181,68 +195,43 @@ type ActionLengthWriter struct {
 	max  int
 	ty   int
 	area []byte
-	buff []byte
+	buff *bytes.Buffer
 	wx   WriterAction
 }
 
 // NewActionLengthWriter returns a new instance of a ActionLengthWriter which
-// appends it's dataLength into a giving sized through size byteslice
+// appends it's dataLength into a giving sized through size byte slice
 // which represent either a int16(where size is 2), int32(where size is 4),
 // int64(where size is 8) is used.
 func NewActionLengthWriter(wx WriterAction, size int, dataLength int) *ActionLengthWriter {
-	var area []byte
-
-	switch size {
-	case 2:
-		area = bit2Pool.Get().([]byte)
-	case 4:
-		area = bit4Pool.Get().([]byte)
-	case 8:
-		area = bit8Pool.Get().([]byte)
-	}
+	buff := bytespool.Get(dataLength)
+	buff.Truncate(0)
 
 	return &ActionLengthWriter{
 		wx:   wx,
 		ty:   size,
+		buff: buff,
 		max:  dataLength,
-		area: area,
-		buff: bytespool.Get(dataLength),
+		area: make([]byte, size),
 	}
 }
 
 // Reset resets action function, size and data length to be used by writer for its operations.
 func (lw *ActionLengthWriter) Reset(wx WriterAction, size int, dataLength int) {
-	var area []byte
-
-	switch size {
-	case 2:
-		area = bit2Pool.Get().([]byte)
-	case 4:
-		area = bit4Pool.Get().([]byte)
-	case 8:
-		area = bit8Pool.Get().([]byte)
-	}
+	buff := bytespool.Get(dataLength)
+	buff.Truncate(0)
 
 	lw.n = 0
 	lw.wx = wx
 	lw.ty = size
-	lw.area = area
+	lw.buff = buff
 	lw.max = dataLength
-	lw.buff = bytespool.Get(dataLength)
+	lw.area = make([]byte, size)
 }
 
 // Close closes this writer and flushes data into underline writer.
 func (lw *ActionLengthWriter) Close() error {
 	if lw.n == 0 {
-		switch lw.ty {
-		case 2:
-			bit2Pool.Put(lw.area)
-		case 4:
-			bit4Pool.Put(lw.area)
-		case 8:
-			bit8Pool.Put(lw.area)
-		}
-
 		lw.wx = nil
 		lw.area = nil
 		lw.buff = nil
@@ -258,18 +247,9 @@ func (lw *ActionLengthWriter) Close() error {
 		binary.BigEndian.PutUint64(lw.area, uint64(lw.n))
 	}
 
-	err := lw.wx(lw.area, lw.buff[0:lw.n])
+	err := lw.wx(lw.area, lw.buff.Bytes()[:lw.n])
 
 	bytespool.Put(lw.buff)
-
-	switch lw.ty {
-	case 2:
-		bit2Pool.Put(lw.area)
-	case 4:
-		bit4Pool.Put(lw.area)
-	case 8:
-		bit8Pool.Put(lw.area)
-	}
 
 	lw.wx = nil
 	lw.area = nil
@@ -286,7 +266,8 @@ func (lw *ActionLengthWriter) Write(d []byte) (int, error) {
 		return 0, ErrLimitExceeded
 	}
 
-	n := copy(lw.buff[lw.n:lw.max], d)
+	//n := copy(lw.buff[lw.n:lw.max], d)
+	n, _ := lw.buff.Write(d)
 	lw.n += n
 	return n, nil
 }

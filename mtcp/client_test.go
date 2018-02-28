@@ -12,8 +12,6 @@ import (
 )
 
 func TestNonTLSNetworkWithClient(t *testing.T) {
-	initMetrics()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	netw, err := createNewNetwork(ctx, "localhost:4050", nil)
 	if err != nil {
@@ -21,7 +19,7 @@ func TestNonTLSNetworkWithClient(t *testing.T) {
 	}
 	tests.Passed("Should have successfully create network")
 
-	client, err := mtcp.Connect("localhost:4050", mtcp.Metrics(events))
+	client, err := mtcp.Connect("localhost:4050")
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully connected to network")
 	}
@@ -79,8 +77,6 @@ func TestNonTLSNetworkWithClient(t *testing.T) {
 }
 
 func TestTLSNetworkWithClient(t *testing.T) {
-	initMetrics()
-
 	_, serverca, clientca, err := createTLSCA()
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully created server and client certs")
@@ -106,7 +102,7 @@ func TestTLSNetworkWithClient(t *testing.T) {
 	}
 	tests.Passed("Should have successfully create network")
 
-	client, err := mtcp.Connect("localhost:4050", mtcp.Metrics(events), mtcp.TLSConfig(clientTls))
+	client, err := mtcp.Connect("localhost:4050", mtcp.TLSConfig(clientTls))
 	if err != nil {
 		tests.FailedWithError(err, "Should have successfully connected to network")
 	}

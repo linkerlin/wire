@@ -96,3 +96,23 @@ Benchmark8KMessages-4         	50000000	        24.4 ns/op	336564.81 MB/s	      
 Benchmark16KMessages-4        	100000000	        24.2 ns/op	677934.91 MB/s	       0 B/op	       0 allocs/op
 PASS
 ok  	github.com/influx6/mnet/msocks	29.265s
+
+Time: 22 Feb 2018
+goos: darwin
+goarch: amd64
+pkg: github.com/influx6/mnet/msocks
+BenchmarkNoBytesMessages-4    	100000000	        16.4 ns/op	 671.12 MB/s	       0 B/op	       0 allocs/op
+Benchmark2BytesMessages-4     	100000000	        16.3 ns/op	 796.30 MB/s	       0 B/op	       0 allocs/op
+Benchmark4BytesMessages-4     	100000000	        16.5 ns/op	 908.18 MB/s	       0 B/op	       0 allocs/op
+Benchmark8BytesMessages-4     	100000000	        16.2 ns/op	1172.20 MB/s	       0 B/op	       0 allocs/op
+Benchmark16BytesMessages-4    	100000000	        16.2 ns/op	1665.61 MB/s	       0 B/op	       0 allocs/op
+Benchmark32BytesMessages-4    	100000000	        16.4 ns/op	2619.44 MB/s	       0 B/op	       0 allocs/op
+Benchmark64BytesMessages-4    	100000000	        16.5 ns/op	4557.34 MB/s	       0 B/op	       0 allocs/op
+Benchmark128BytesMessages-4   	100000000	        16.1 ns/op	8615.40 MB/s	       0 B/op	       0 allocs/op
+Benchmark256BytesMessages-4   	100000000	        16.1 ns/op	16551.38 MB/s	       0 B/op	       0 allocs/op
+Benchmark1KMessages-4         	100000000	        16.3 ns/op	63346.20 MB/s	       0 B/op	       0 allocs/op
+Benchmark4KMessages-4         	100000000	        16.2 ns/op	253815.45 MB/s	       0 B/op	       0 allocs/op
+Benchmark8KMessages-4         	100000000	        16.3 ns/op	504765.96 MB/s	       0 B/op	       0 allocs/op
+Benchmark16KMessages-4        	100000000	        16.4 ns/op	1000206.44 MB/s	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/influx6/mnet/msocks	29.315s

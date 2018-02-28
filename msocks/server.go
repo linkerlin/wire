@@ -15,7 +15,7 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	"github.com/influx6/faux/metrics"
+	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/melon"
 	"github.com/influx6/mnet"
@@ -25,12 +25,14 @@ import (
 )
 
 var (
-	wsState                 = ws.StateServerSide
-	cinfoBytes              = []byte(mnet.CINFO)
-	rinfoBytes              = []byte(mnet.RINFO)
-	clStatusBytes           = []byte(mnet.CLSTATUS)
-	rescueBytes             = []byte(mnet.CRESCUE)
-	handshakeCompletedBytes = []byte(mnet.CLHANDSHAKECOMPLETED)
+	wsState                       = ws.StateServerSide
+	cinfoBytes                    = []byte(mnet.CINFO)
+	rinfoBytes                    = []byte(mnet.RINFO)
+	clStatusBytes                 = []byte(mnet.CLSTATUS)
+	rescueBytes                   = []byte(mnet.CRESCUE)
+	handshakeCompletedBytes       = []byte(mnet.CLHANDSHAKECOMPLETED)
+	clientHandshakeCompletedBytes = []byte(mnet.ClientHandShakeCompleted)
+	serverSrc                     = history.FromTag("msocks-server")
 )
 
 //************************************************************************
@@ -46,6 +48,7 @@ type websocketServerClient struct {
 	id             string
 	nid            string
 	isACluster     bool
+	logs           history.Ctx
 	srcInfo        *mnet.Info
 	localAddr      net.Addr
 	remoteAddr     net.Addr
@@ -53,7 +56,6 @@ type websocketServerClient struct {
 	serverAddr     net.Addr
 	wshandshake    ws.Handshake
 	network        *WebsocketNetwork
-	metrics        metrics.Metrics
 	parser         *internal.TaggedMessages
 	closedCounter  int64
 	waiter         sync.WaitGroup
@@ -131,12 +133,7 @@ func (sc *websocketServerClient) write(size int) (io.WriteCloser, error) {
 			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 			if err := sc.wsWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
-				sc.metrics.Emit(
-					metrics.Error(err),
-					metrics.WithID(sc.id),
-					metrics.With("network", sc.nid),
-					metrics.Message("Connection failed to pre-flush existing data before new write"),
-				)
+				serverSrc.FromTitle("websocketServerClient.write").Error(err, "flush failed").Red("failed to pre-flush data").Done()
 				return err
 			}
 			conn.SetWriteDeadline(time.Time{})
@@ -173,6 +170,10 @@ func (sc *websocketServerClient) clientRead() ([]byte, error) {
 		return nil, err
 	}
 
+	//if bytes.HasPrefix(indata, clientHandshakeCompletedBytes) {
+	//	return nil, mnet.ErrNoDataYet
+	//}
+
 	if bytes.Equal(indata, rescueBytes) {
 		return nil, mnet.ErrNoDataYet
 	}
@@ -204,15 +205,14 @@ func (sc *websocketServerClient) serverRead() ([]byte, error) {
 
 	atomic.AddInt64(&sc.totalRead, int64(len(indata)))
 
+	if bytes.HasPrefix(indata, clientHandshakeCompletedBytes) {
+		return nil, mnet.ErrNoDataYet
+	}
+
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := sc.handleCINFO(); err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.Message("handleCINFO failed"),
-			)
+			sc.logs.FromTitle("websocketServerClient.write").With("client", sc.id).
+				Error(err, "failed to pre-flush data").Done()
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -220,13 +220,8 @@ func (sc *websocketServerClient) serverRead() ([]byte, error) {
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
 		if err := sc.handleCLStatusReceive(indata); err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.Message("handleCLStatusRecieve failed"),
-			)
+			serverSrc.FromTitle("websocketServerClient.write").With("client", sc.id).
+				Error(err, "failed to receive status request").Done()
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -247,6 +242,23 @@ func (sc *websocketServerClient) hasPending() bool {
 	}
 
 	return sc.wsWriter.Buffered() > 0
+}
+
+func (sc *websocketServerClient) buffered() (float64, error) {
+	if err := sc.isAlive(); err != nil {
+		return 0, err
+	}
+
+	sc.bu.Lock()
+	defer sc.bu.Unlock()
+
+	if sc.wsWriter == nil {
+		return 0, mnet.ErrAlreadyClosed
+	}
+
+	available := float64(sc.wsWriter.Available())
+	buffered := float64(sc.wsWriter.Buffered())
+	return buffered / available, nil
 }
 
 func (sc *websocketServerClient) flush() error {
@@ -274,12 +286,8 @@ func (sc *websocketServerClient) flush() error {
 		conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 		if err := sc.wsWriter.Flush(); err != nil {
 			conn.SetWriteDeadline(time.Time{})
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.Message("Connection failed to flush data"),
-				metrics.With("network", sc.nid),
-			)
+			sc.logs.FromTitle("websocketServerClient.flush").
+				Error(err, "failed to receive status request").Done()
 			return err
 		}
 		conn.SetWriteDeadline(time.Time{})
@@ -289,23 +297,13 @@ func (sc *websocketServerClient) flush() error {
 }
 
 func (sc *websocketServerClient) close() error {
+	logs := sc.logs.FromTitle("websocketServerClient.close")
 	if err := sc.isAlive(); err != nil {
-		sc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(sc.id),
-			metrics.With("client", sc.id),
-			metrics.With("network", sc.nid),
-			metrics.Message("Closing websocket node connection"),
-		)
+		logs.Error(err, "closing websocket node connection")
 		return err
 	}
 
-	sc.metrics.Emit(
-		metrics.WithID(sc.id),
-		metrics.With("client", sc.id),
-		metrics.With("network", sc.nid),
-		metrics.Message("Closing websocket node connection"),
-	)
+	logs.Info("closing websocket node connection")
 
 	atomic.StoreInt64(&sc.closedCounter, 1)
 
@@ -330,13 +328,7 @@ func (sc *websocketServerClient) close() error {
 	sc.cu.Unlock()
 
 	if err != nil {
-		sc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(sc.id),
-			metrics.With("client", sc.id),
-			metrics.With("network", sc.nid),
-			metrics.Message("Closed websocket net.Conn connection"),
-		)
+		logs.Error(err, "closing websocket node connection")
 	}
 
 	return err
@@ -351,30 +343,21 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
 	incoming := make([]byte, mnet.SmallestMinBufferSize)
 
+	logs := sc.logs.FromTitle("websocketServerClient.readLoop")
+
 	for {
 
 		wsFrame, err := reader.NextFrame()
 		if err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.Message("Connection failed to read next frame"),
-			)
+			logs.FromKV("remoteAddr", conn.RemoteAddr()).
+				Error(err, "failed to read websocket data frame").Done()
 			return
 		}
 
 		frame, err := lreader.ReadHeader()
 		if err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.With("frame", frame),
-				metrics.With("ws-frame", wsFrame),
-				metrics.Message("Connection failed to read data frame"),
-				metrics.With("network", sc.nid),
-			)
+			logs.FromKV("remoteAddr", conn.RemoteAddr()).
+				Error(err, "failed to read data header").Done()
 			return
 		}
 
@@ -382,40 +365,22 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 
 		n, err := lreader.Read(incoming)
 		if err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.With("read-length", n),
-				metrics.With("length", len(incoming[:n])),
-				metrics.With("data", string(incoming[:n])),
-				metrics.Message("Connection failed to read: closing"),
-				metrics.With("network", sc.nid),
-			)
+			logs.FromKV("remoteAddr", conn.RemoteAddr()).
+				Error(err, "failed to read data header").Done()
 			return
 		}
 
-		sc.metrics.Send(metrics.Entry{
-			Message: "Received websocket message",
-			Field: metrics.Field{
-				"data":     string(incoming[:n]),
-				"length":   len(incoming[:n]),
-				"frame":    frame,
-				"ws-frame": wsFrame,
-			},
-		})
+		logs.FromKV("remoteAddr", conn.RemoteAddr()).
+			With("data", string(incoming[:n])).With("ws-frame", wsFrame).
+			With("length", n).Info("received websocket message").Done()
 
 		atomic.AddInt64(&sc.totalRead, int64(len(incoming[:n])))
 
 		// Send into go-routine (critical path)?
 		if err := sc.parser.Parse(incoming[:n]); err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.Message("ParseError"),
-				metrics.With("network", sc.nid),
-				metrics.With("length", len(incoming)),
-				metrics.With("data", string(incoming)),
-			)
+			logs.FromKV("remoteAddr", conn.RemoteAddr()).
+				With("data", string(incoming[:n])).With("ws-frame", wsFrame).
+				With("length", n).Error(err, "failed to parse data").Done()
 			return
 		}
 	}
@@ -537,87 +502,58 @@ func (sc *websocketServerClient) handleRINFO(data []byte) error {
 	return nil
 }
 
-func (sc *websocketServerClient) sendCINFOReq() error {
-	// Send to new client mnet.CINFO request
-	wc, err := sc.write(len(cinfoBytes))
+func (sc *websocketServerClient) sendCLHSCompleted() error {
+	wc, err := sc.write(len(clientHandshakeCompletedBytes))
 	if err != nil {
-		sc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(sc.id),
-			metrics.With("client", sc.id),
-			metrics.With("network", sc.nid),
-			metrics.Message("websocketServerClient.Handshake: failed to send CINFO req"),
-		)
 		return err
 	}
 
-	if _, err := wc.Write(cinfoBytes); err != nil {
-		sc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(sc.id),
-			metrics.With("client", sc.id),
-			metrics.With("network", sc.nid),
-			metrics.Message("websocketServerClient.Handshake: failed to send CINFO req"),
-		)
+	if _, err := wc.Write(clientHandshakeCompletedBytes); err != nil {
 		return err
 	}
 
 	if err := wc.Close(); err != nil {
-		sc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(sc.id),
-			metrics.With("client", sc.id),
-			metrics.With("network", sc.nid),
-			metrics.Message("websocketServerClient.Handshake: failed to send CINFO req"),
-		)
 		return err
 	}
 
 	if err := sc.flush(); err != nil {
-		sc.metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(sc.id),
-			metrics.With("client", sc.id),
-			metrics.With("network", sc.nid),
-			metrics.Message("websocketServerClient.Handshake: failed to flush CINFO req"),
-		)
 		return err
 	}
 
-	sc.metrics.Emit(
-		metrics.WithID(sc.id),
-		metrics.With("client", sc.id),
-		metrics.With("network", sc.nid),
-		metrics.Message("websocketServerClient.Handshake: Sent CINFO req"),
-	)
+	return nil
+}
+
+func (sc *websocketServerClient) sendCINFOReq() error {
+	// Send to new client mnet.CINFO request
+	wc, err := sc.write(len(cinfoBytes))
+	if err != nil {
+		return err
+	}
+
+	if _, err := wc.Write(cinfoBytes); err != nil {
+		return err
+	}
+
+	if err := wc.Close(); err != nil {
+		return err
+	}
+
+	if err := sc.flush(); err != nil {
+		return err
+	}
 
 	return nil
 }
 
 func (sc *websocketServerClient) handshake() error {
-	sc.metrics.Emit(
-		metrics.WithID(sc.id),
-		metrics.With("client", sc.id),
-		metrics.With("network", sc.nid),
-		metrics.With("local-addr", sc.localAddr),
-		metrics.With("remote-addr", sc.remoteAddr),
-		metrics.With("server-addr", sc.serverAddr),
-		metrics.Message("websocketServerClient.Handshake"),
-	)
+	logs := sc.logs.FromTitle("websocketServerClient.handshake")
+	defer logs.Done()
 
 	if err := sc.sendCINFOReq(); err != nil {
+		logs.Error(err, "error sending CINFO request")
+		logs.Red("Failed to send CINFO request")
 		return err
 	}
-
-	sc.metrics.Emit(
-		metrics.WithID(sc.id),
-		metrics.With("client", sc.id),
-		metrics.With("network", sc.nid),
-		metrics.With("local-addr", sc.localAddr),
-		metrics.With("remote-addr", sc.remoteAddr),
-		metrics.With("server-addr", sc.serverAddr),
-		metrics.Message("websocketServerClient.Handshake: Awating CINFO response"),
-	)
 
 	before := time.Now()
 
@@ -626,48 +562,25 @@ func (sc *websocketServerClient) handshake() error {
 		msg, err := sc.serverRead()
 		if err != nil {
 			if err != mnet.ErrNoDataYet {
-				sc.metrics.Emit(
-					metrics.Error(err),
-					metrics.WithID(sc.id),
-					metrics.With("client", sc.id),
-					metrics.With("network", sc.nid),
-					metrics.Message("websocketServerClient.Handshake: HandShake failed"),
-				)
 				return err
 			}
 
 			if time.Now().Sub(before) > mnet.MaxInfoWait {
 				sc.close()
-				sc.metrics.Emit(
-					metrics.Error(mnet.ErrFailedToRecieveInfo),
-					metrics.WithID(sc.id),
-					metrics.With("client", sc.id),
-					metrics.With("network", sc.nid),
-					metrics.Message("websocketServerClient.Handshake: HandShake Timeout : no RINFO response"),
-				)
+				logs.Error(mnet.ErrFailedToRecieveInfo, "read timeout")
+				logs.Red("read timeout")
 				return mnet.ErrFailedToRecieveInfo
 			}
 			continue
 		}
 
-		sc.metrics.Emit(
-			metrics.WithID(sc.id),
-			metrics.With("client", sc.id),
-			metrics.With("network", sc.nid),
-			metrics.With("message", string(msg)),
-			metrics.Message("websocketServerClient.Handshake: Message received"),
-		)
-
 		// if we get a rescue signal, then client never got our CINFO request, so resent.
 		if bytes.Equal(msg, rescueBytes) {
-			sc.metrics.Emit(
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
-			)
+			logs.Info("received rescue request")
 
 			if err := sc.sendCINFOReq(); err != nil {
+				logs.Error(err, "failed to send CINFO after rescue request")
+				logs.Red("send error with CINFO after rescue")
 				return err
 			}
 
@@ -679,52 +592,28 @@ func (sc *websocketServerClient) handshake() error {
 		// First message should be a mnet.RCINFO response.
 		if !bytes.HasPrefix(msg, rinfoBytes) {
 			sc.close()
-			sc.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.With("data", string(msg)),
-				metrics.Message("websocketServerClient.Handshake:Invalid mnet.RCINFO prefix"),
-			)
+
+			logs.Error(mnet.ErrFailedToRecieveInfo, "failed to receive RCINFO response")
+			logs.Red("failed handshake at RCINFO response")
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		if err := sc.handleRINFO(msg); err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.With("data", string(msg)),
-				metrics.Message("websocketServerClient.Handshake:Invalid mnet.RCINFO data"),
-			)
+			logs.Error(err, "failed to process RCINFO response")
+			logs.Red("failed handshake at RCINFO response process")
 			return err
 		}
 
 		break
 	}
 
-	sc.metrics.Emit(
-		metrics.WithID(sc.id),
-		metrics.With("client", sc.id),
-		metrics.With("network", sc.nid),
-		metrics.With("local-addr", sc.localAddr),
-		metrics.With("remote-addr", sc.remoteAddr),
-		metrics.With("server-addr", sc.serverAddr),
-		metrics.Message("websocketServerClient.Handshake: Send Cluster Status Message"),
-	)
-
 	// if its a cluster send Cluster Status message.
 	if sc.isACluster {
+		logs.Info("client cluster handshake agreement processing")
+
 		if err := sc.handleCLStatusSend(); err != nil {
-			sc.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.Message("websocketServerClient.Handshake: HandShake CLSTATUS send failed"),
-			)
+			logs.Error(err, "failed to send CLStatus message")
+			logs.Red("failed handshake at CLStatus message")
 			return err
 		}
 
@@ -735,55 +624,23 @@ func (sc *websocketServerClient) handshake() error {
 			msg, err := sc.serverRead()
 			if err != nil {
 				if err != mnet.ErrNoDataYet {
-					sc.metrics.Emit(
-						metrics.Error(err),
-						metrics.WithID(sc.id),
-						metrics.With("client", sc.id),
-						metrics.With("network", sc.nid),
-						metrics.Message("websocketServerClient.Handshake: HandShake failed"),
-					)
 					return err
 				}
 
 				if time.Now().Sub(before) > mnet.MaxInfoWait {
 					sc.close()
-					sc.metrics.Emit(
-						metrics.Error(mnet.ErrFailedToCompleteHandshake),
-						metrics.WithID(sc.id),
-						metrics.With("client", sc.id),
-						metrics.With("network", sc.nid),
-						metrics.Message("websocketServerClient.Handshake: HandShake Timeout : no completion signal"),
-					)
+					logs.Error(mnet.ErrFailedToCompleteHandshake, "response timeout")
+					logs.Red("failed to complete handshake")
 					return mnet.ErrFailedToCompleteHandshake
 				}
 				continue
 			}
 
-			sc.metrics.Emit(
-				metrics.WithID(sc.id),
-				metrics.With("client", sc.id),
-				metrics.With("network", sc.nid),
-				metrics.With("message", string(msg)),
-				metrics.Message("websocketServerClient.Handshake: Message received"),
-			)
-
 			// if we get a rescue signal, then client never got our CLStatus response, so resend.
 			if bytes.Equal(msg, rescueBytes) {
-				sc.metrics.Emit(
-					metrics.WithID(sc.id),
-					metrics.With("client", sc.id),
-					metrics.With("network", sc.nid),
-					metrics.Message("websocketServerClient.Handshake: HandShake Rescue received"),
-				)
-
 				if err := sc.handleCLStatusSend(); err != nil {
-					sc.metrics.Emit(
-						metrics.Error(err),
-						metrics.WithID(sc.id),
-						metrics.With("client", sc.id),
-						metrics.With("network", sc.nid),
-						metrics.Message("websocketServerClient.Handshake: HandShake Rescue CLSTATUS send failed"),
-					)
+					logs.Error(err, "failed to send CLStatus response message")
+					logs.Red("failed to complete handshake at CLStatus")
 					return err
 				}
 
@@ -793,30 +650,22 @@ func (sc *websocketServerClient) handshake() error {
 			}
 
 			if !bytes.Equal(msg, handshakeCompletedBytes) {
-				sc.metrics.Emit(
-					metrics.Error(mnet.ErrFailedToCompleteHandshake),
-					metrics.WithID(sc.id),
-					metrics.With("client", sc.id),
-					metrics.With("network", sc.nid),
-					metrics.With("data", string(msg)),
-					metrics.Message("websocketServerClient.Handshake:Invalid handshake completion data"),
-				)
+				logs.Error(mnet.ErrFailedToCompleteHandshake, "failed to received handshake completion")
+				logs.Red("failed to complete handshake at completion signal")
 				return mnet.ErrFailedToCompleteHandshake
 			}
 
 			break
 		}
+	} else {
+		if err := sc.sendCLHSCompleted(); err != nil {
+			logs.Error(err, "failed to deliver CLHS handshake completion signal")
+			logs.Red("failed non-cluster handshake completion")
+			return err
+		}
 	}
 
-	sc.metrics.Emit(
-		metrics.WithID(sc.id),
-		metrics.With("client", sc.id),
-		metrics.With("network", sc.nid),
-		metrics.With("local-addr", sc.localAddr),
-		metrics.With("remote-addr", sc.remoteAddr),
-		metrics.With("server-addr", sc.serverAddr),
-		metrics.Message("websocketServerClient.Handshake: Completed"),
-	)
+	logs.Info("handshake completed")
 
 	return nil
 }
@@ -833,7 +682,6 @@ type WebsocketNetwork struct {
 	TLS        *tls.Config
 	Upgrader   *ws.Upgrader
 	Handler    mnet.ConnHandler
-	Metrics    metrics.Metrics
 
 	totalClients int64
 	totalClosed  int64
@@ -875,6 +723,7 @@ type WebsocketNetwork struct {
 	// and will be written directly.
 	MaxWriteSize int
 
+	logs   history.Ctx
 	ctx    context.Context
 	cancel func()
 
@@ -926,10 +775,6 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 		n.ID = uuid.NewV4().String()
 	}
 
-	if n.Metrics == nil {
-		n.Metrics = metrics.New()
-	}
-
 	if n.Upgrader == nil {
 		n.Upgrader = &ws.Upgrader{}
 	}
@@ -948,13 +793,11 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 		n.ServerName = host
 	}
 
-	defer n.Metrics.Emit(
-		metrics.Message("WebsocketNetwork.Start"),
-		metrics.With("network", n.ID),
-		metrics.With("addr", n.Addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.WithID(n.ID),
-	)
+	n.logs = serverSrc.With("network-id", n.ID).
+		With("serverName", n.ServerName).
+		With("addr", n.Addr)
+
+	defer n.logs.FromTitle("WebsocketNetwork.Start").Info("Started").Done()
 
 	if n.TLS != nil && !n.TLS.InsecureSkipVerify {
 		n.TLS.ServerName = n.ServerName
@@ -1008,12 +851,9 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 func (n *WebsocketNetwork) registerCluster(clusters []mnet.Info) {
 	for _, cluster := range clusters {
 		if err := n.AddCluster(cluster.ServerAddr); err != nil {
-			n.Metrics.Send(metrics.Entry{
-				ID:      n.ID,
-				Level:   metrics.ErrorLvl,
-				Message: "Failed to add cluster addresss",
-				Field:   metrics.Field{"info": cluster, "nid": n.ID, "error": err},
-			})
+			n.logs.FromTitle("WebsocketNetwork.registerClusters").
+				With("info", cluster).
+				Error(err, "failed to add cluster address").Done()
 		}
 	}
 }
@@ -1026,16 +866,12 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		return nil
 	}
 
+	log := n.logs.FromTitle("WebsocketNetwork.AddCluster").With("addr", addr)
+	defer log.Done()
+
 	if n.connectedToMeByAddr(addr) {
-		n.Metrics.Emit(
-			metrics.Error(mnet.ErrAlreadyServiced),
-			metrics.WithID(n.ID),
-			metrics.With("network", n.ID),
-			metrics.With("addr", n.Addr),
-			metrics.With("target", addr),
-			metrics.With("serverName", n.ServerName),
-			metrics.Message("WebsocketNetwork.AddCluster: cluster already exists"),
-		)
+		log.Error(mnet.ErrAlreadyServiced, "cluster already exists").Done()
+		log.Red("failed to cluster with network")
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -1049,31 +885,15 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 
 	conn, _, hs, err := n.Dialer.Dial(context.Background(), addr)
 	if err != nil {
-		n.Metrics.Emit(
-			metrics.Error(err),
-			metrics.WithID(n.ID),
-			metrics.With("network", n.ID),
-			metrics.With("addr", n.Addr),
-			metrics.With("target", addr),
-			metrics.With("serverName", n.ServerName),
-			metrics.Message("WebsocketNetwork.AddCluster: unable to dial network"),
-		)
+		log.Error(err, "unable to dial network address")
+		log.Red("failed to cluster with network")
 		return err
 	}
 
 	if n.connectedToMeByAddr(conn.RemoteAddr().String()) {
 		conn.Close()
-		n.Metrics.Emit(
-			metrics.Error(mnet.ErrAlreadyServiced),
-			metrics.WithID(n.ID),
-			metrics.With("network", n.ID),
-			metrics.With("addr", n.Addr),
-			metrics.With("target", addr),
-			metrics.With("target-remote", conn.RemoteAddr()),
-			metrics.With("target-local", conn.RemoteAddr()),
-			metrics.With("serverName", n.ServerName),
-			metrics.Message("WebsocketNetwork.AddCluster: cluster already exists"),
-		)
+		log.Error(mnet.ErrAlreadyServiced, "cluster address exists already")
+		log.Red("failed to cluster with network")
 		return mnet.ErrAlreadyServiced
 	}
 
@@ -1081,41 +901,14 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		return n.AddCluster(addr)
 	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
 
-	n.Metrics.Emit(
-		metrics.WithID(n.ID),
-		metrics.With("network", n.ID),
-		metrics.With("addr", n.Addr),
-		metrics.With("target", addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.Message("WebsocketNetwork.AddCluster: Cluster net.Conn acheived"),
-	)
-
 	if err := n.addWSClient(conn, hs, policy, true); err != nil {
 		conn.Close()
-		n.Metrics.Send(metrics.Entry{
-			ID:      n.ID,
-			Level:   metrics.ErrorLvl,
-			Message: "Failed to add new connection",
-			Field: metrics.Field{
-				"err":         err,
-				"remote_addr": conn.RemoteAddr(),
-				"local_addr":  conn.LocalAddr(),
-			},
-		})
+		log.Error(mnet.ErrAlreadyServiced, "failed to add websocket cluster")
+		log.Red("failed to cluster with network")
 		return err
 	}
 
-	n.Metrics.Send(metrics.Entry{
-		ID:      n.ID,
-		Level:   metrics.InfoLvl,
-		Message: "Added new cluster connection",
-		Field: metrics.Field{
-			"err":         err,
-			"remote_addr": conn.RemoteAddr(),
-			"local_addr":  conn.LocalAddr(),
-		},
-	})
-
+	log.Info("cluster connection established")
 	return nil
 }
 
@@ -1159,47 +952,22 @@ func (n *WebsocketNetwork) connectedToMe(conn net.Conn) bool {
 // AddClient adds a new websocket client through the provided
 // net.Conn.
 func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, isCluster bool) error {
+	log := n.logs.FromTitle("WebsocketNetwork.addClient").
+		With("remote-addr", newConn.RemoteAddr()).
+		With("local-addr", newConn.LocalAddr())
+	defer log.Done()
+
 	handshake, err := n.Upgrader.Upgrade(newConn)
 	if err != nil {
-		n.Metrics.Send(metrics.Entry{
-			ID:      n.ID,
-			Level:   metrics.ErrorLvl,
-			Message: "Failed to upgrade connection",
-			Field: metrics.Field{
-				"err":         err,
-				"remote_addr": newConn.RemoteAddr(),
-				"local_addr":  newConn.LocalAddr(),
-			},
-		})
-
+		log.Error(err, "Failed to upgrade net.Conn")
 		return newConn.Close()
 	}
 
-	n.Metrics.Send(metrics.Entry{
-		ID:      n.ID,
-		Level:   metrics.InfoLvl,
-		Message: "Upgraded connection successfully",
-		Field: metrics.Field{
-			"handshake":   handshake,
-			"remote_addr": newConn.RemoteAddr(),
-			"local_addr":  newConn.LocalAddr(),
-		},
-	})
+	log.Info("net.Conn upgraded successfully")
 
 	if err := n.addWSClient(newConn, handshake, policy, isCluster); err != nil {
 		newConn.Close()
-
-		n.Metrics.Send(metrics.Entry{
-			ID:      n.ID,
-			Level:   metrics.ErrorLvl,
-			Message: "Failed to add new connection",
-			Field: metrics.Field{
-				"err":         err,
-				"remote_addr": newConn.RemoteAddr(),
-				"local_addr":  newConn.LocalAddr(),
-			},
-		})
-
+		log.Error(err, "net.Conn failed")
 		return err
 	}
 
@@ -1207,18 +975,15 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, 
 }
 
 func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mnet.RetryPolicy, isCluster bool) error {
+	log := n.logs.FromTitle("WebsocketNetwork.addWSClient").
+		With("remote-addr", conn.RemoteAddr()).
+		With("local-addr", conn.LocalAddr())
+	defer log.Done()
+
 	atomic.AddInt64(&n.totalClients, 1)
 	atomic.AddInt64(&n.totalOpened, 1)
 
-	n.Metrics.Emit(
-		metrics.Message("WebsocketNetwork.addClient: adding new client"),
-		metrics.With("network", n.ID),
-		metrics.With("addr", n.Addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.With("client_localAddr", conn.LocalAddr()),
-		metrics.With("client_remoteAddr", conn.RemoteAddr()),
-		metrics.WithID(n.ID),
-	)
+	log.Info("Attempting to add net.Conn as websocket server client")
 
 	var wsReader *wsutil.Reader
 	var wsWriter *wsutil.Writer
@@ -1236,7 +1001,6 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	client.conn = conn
 	client.network = n
 	client.wshandshake = hs
-	client.metrics = n.Metrics
 	client.wsReader = wsReader
 	client.wsWriter = wsWriter
 	client.serverAddr = n.raddr
@@ -1246,12 +1010,18 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	client.localAddr = conn.LocalAddr()
 	client.remoteAddr = conn.RemoteAddr()
 	client.parser = new(internal.TaggedMessages)
+	client.logs = n.logs.FromFields(map[string]interface{}{
+		"server-addr": n.raddr,
+		"client-id":   client.id,
+		"server-id":   client.nid,
+		"localAddr":   conn.LocalAddr(),
+		"remoteAddr":  conn.RemoteAddr(),
+	})
 
 	client.waiter.Add(1)
 	go client.readLoop(conn, wsReader)
 
 	var mclient mnet.Client
-	mclient.Metrics = n.Metrics
 	mclient.NID = n.ID
 	mclient.ID = client.id
 	mclient.CloseFunc = client.close
@@ -1260,6 +1030,7 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	mclient.LiveFunc = client.isAlive
 	mclient.LiveFunc = client.isAlive
 	mclient.InfoFunc = client.getInfo
+	mclient.BufferedFunc = client.buffered
 	mclient.ReaderFunc = client.serverRead
 	mclient.HasPendingFunc = client.hasPending
 	mclient.LocalAddrFunc = client.getLocalAddr
@@ -1287,13 +1058,8 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 		defer atomic.StoreInt64(&client.closedCounter, 1)
 
 		if err := n.Handler(mc); err != nil {
-			n.Metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(mclient.ID),
-				metrics.Message("Connection handler failed"),
-				metrics.With("network", n.ID),
-				metrics.With("addr", addr),
-			)
+			client.logs.Error(err, "Client connection handler failed")
+			log.Red("Client handler stopped").Done()
 		}
 
 		n.cu.Lock()
@@ -1314,23 +1080,11 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 					return
 				}
 
-				n.Metrics.Emit(
-					metrics.WithID(mclient.ID),
-					metrics.With("addr", addr),
-					metrics.With("network", n.ID),
-					metrics.With("local-addr", client.localAddr),
-					metrics.With("remote-addr", client.remoteAddr),
-					metrics.Message("websocketServerClient.addWSClient: Applying retry policy"),
-				)
+				log.Info("Client calling retry policy")
+				defer log.Done()
 
 				if err := policy.Retry(); err != nil {
-					n.Metrics.Emit(
-						metrics.Error(err),
-						metrics.With("addr", addr),
-						metrics.WithID(mclient.ID),
-						metrics.With("network", n.ID),
-						metrics.Message("RetryPolicy failed"),
-					)
+					log.Error(err, "Client retry failed").Done()
 				}
 			}()
 		}
@@ -1360,11 +1114,11 @@ func (n *WebsocketNetwork) getAllClient(cid string) ([]mnet.Client, error) {
 		var client mnet.Client
 		client.NID = n.ID
 		client.ID = conn.id
-		client.Metrics = n.Metrics
 		client.LiveFunc = conn.isAlive
 		client.InfoFunc = conn.getInfo
 		client.WriteFunc = conn.write
 		client.FlushFunc = conn.flush
+		client.BufferedFunc = conn.buffered
 		client.HasPendingFunc = conn.hasPending
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
@@ -1386,25 +1140,12 @@ func (n *WebsocketNetwork) handleConnections(ctx context.Context, stream melon.C
 	defer n.routines.Done()
 	defer n.closeClientConnections(ctx)
 
-	defer n.Metrics.Emit(
-		metrics.With("network", n.ID),
-		metrics.Message("WebsocketNetwork.runStream"),
-		metrics.With("addr", n.Addr),
-		metrics.With("serverName", n.ServerName),
-		metrics.WithID(n.ID),
-	)
-
 	initial := mnet.MinTemporarySleep
 
 	for {
 		newConn, err := stream.ReadConn()
 		if err != nil {
-			n.Metrics.Send(metrics.Entry{
-				ID:      n.ID,
-				Field:   metrics.Field{"err": err},
-				Message: "Failed to read connection",
-			})
-
+			n.logs.FromTitle("WebsocketNetwork.handleConnections").Error(err, "Failed to read connection").Done()
 			if err == mlisten.ErrListenerClosed {
 				return
 			}

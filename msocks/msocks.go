@@ -15,7 +15,7 @@ import (
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	"github.com/influx6/faux/metrics"
+	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/internal"
@@ -23,13 +23,14 @@ import (
 )
 
 var (
-	wsClientState = ws.StateClientSide
 	wsReadBuffer  = 1024
 	wsWriteBuffer = 1024
+	wsClientState = ws.StateClientSide
 )
 
 // errors ...
 var (
+	historySrc     = history.FromTag("msocks-client")
 	ErrNoTLSConfig = errors.New("no tls.Config provided")
 )
 
@@ -45,20 +46,14 @@ func MaxBuffer(buffer int) ConnectOptions {
 	}
 }
 
-// Metrics sets the metrics instance to be used by the client for
-// logging.
-func Metrics(m metrics.Metrics) ConnectOptions {
-	return func(cm *socketClient) {
-		cm.metrics = m
-	}
-}
-
 // TLSConfig sets the giving tls.Config to be used by the returned
 // client.
 func TLSConfig(config *tls.Config) ConnectOptions {
 	return func(cm *socketClient) {
-		cm.secure = true
-		cm.tls = config
+		if config != nil {
+			cm.secure = true
+			cm.tls = config
+		}
 	}
 }
 
@@ -125,10 +120,6 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		network.network = "udp"
 	}
 
-	if network.metrics == nil {
-		network.metrics = metrics.New()
-	}
-
 	if network.maxWrite <= 0 {
 		network.maxWrite = mnet.MaxBufferSize
 	}
@@ -141,10 +132,10 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		}
 	}
 
+	network.logs = historySrc
 	network.parser = new(internal.TaggedMessages)
 
 	c.NID = network.nid
-	c.Metrics = network.metrics
 	c.CloseFunc = network.close
 	c.WriteFunc = network.write
 	c.FlushFunc = network.flush
@@ -225,15 +216,12 @@ func (cn *socketClient) handleCINFO() error {
 }
 
 func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
-	cn.metrics.Emit(
-		metrics.WithID(cn.id),
-		metrics.With("client", cn.id),
-		metrics.With("network", cn.nid),
-		metrics.With("local-addr", cn.localAddr),
-		metrics.With("remote-addr", cn.remoteAddr),
-		metrics.With("server-addr", cn.serverAddr),
-		metrics.Message("socketClient.Handshake: Awaiting CINFO request from server"),
-	)
+	bctx := historySrc.FromTitle("socketClient.respondToINFO")
+	defer bctx.Done()
+
+	bctx.Info("Awaiting CINFO request from server")
+	bctx.With("client", cn.id).With("network", cn.nid)
+	bctx.With("local-addr", cn.localAddr).With("remote-addr", cn.remoteAddr).With("server-addr", cn.serverAddr)
 
 	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
 	msg := make([]byte, mnet.SmallestMinBufferSize)
@@ -245,13 +233,7 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 		// if we failed and timed out, then send rescue message and re-await.
 		if sendRescueMsg {
 			if err := cn.sendRescue(); err != nil {
-				cn.metrics.Emit(
-					metrics.Error(err),
-					metrics.WithID(cn.id),
-					metrics.With("client", cn.id),
-					metrics.With("network", cn.nid),
-					metrics.Message("socketClient.respondToINFO: failed to receive CRESCUE req"),
-				)
+				bctx.Red("failed to receive CRESCUE req")
 				return err
 			}
 
@@ -264,13 +246,7 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 		size, err := lreader.ReadHeader()
 		if err != nil {
 			conn.SetReadDeadline(time.Time{})
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req header"),
-			)
+			bctx.Red("failed to receive data header")
 
 			// if its a timeout error then retry if we are not maxed attempts.
 			if netErr, ok := err.(net.Error); ok {
@@ -287,47 +263,59 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 		conn.SetReadDeadline(time.Time{})
 
 		msg = make([]byte, size)
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+
 		_, err = lreader.Read(msg)
 		if err != nil {
-			conn.SetReadDeadline(time.Time{})
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.Message("socketClient.respondToINFO: failed to receive mnet.RCINFo req data"),
-			)
+			bctx.Red("failed to receive mnet.RCINFO req header")
 			return err
 		}
-		conn.SetReadDeadline(time.Time{})
 
 		if !bytes.Equal(msg, cinfoBytes) {
-			cn.metrics.Emit(
-				metrics.Error(mnet.ErrFailedToRecieveInfo),
-				metrics.WithID(cn.id),
-				metrics.With("client", cn.id),
-				metrics.With("network", cn.nid),
-				metrics.With("msg", string(msg)),
-				metrics.Message("socketClient.respondToCINFO: Invalid mnet.RCINFO prefix"),
-			)
+			bctx.Error(mnet.ErrFailedToRecieveInfo, "no reception of info")
+			bctx.Red("invalid mnet.RCINFO prefix")
 			return mnet.ErrFailedToRecieveInfo
 		}
 
 		break
 	}
 
-	cn.metrics.Emit(
-		metrics.WithID(cn.id),
-		metrics.With("client", cn.id),
-		metrics.With("network", cn.nid),
-		metrics.With("local-addr", cn.localAddr),
-		metrics.With("remote-addr", cn.remoteAddr),
-		metrics.With("server-addr", cn.serverAddr),
-		metrics.Message("socketClient.Handshake: Sending CINFO completed"),
-	)
+	bctx.Info("Sending CINFO completed")
 
-	return cn.handleCINFO()
+	if err := cn.handleCINFO(); err != nil {
+		return err
+	}
+
+	bctx.Info("Awaiting Handshake complete signal")
+
+	for {
+		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		size, err := lreader.ReadHeader()
+		if err != nil {
+			conn.SetReadDeadline(time.Time{})
+			if err == io.EOF {
+				continue
+			}
+			return err
+		}
+		conn.SetReadDeadline(time.Time{})
+
+		msg = make([]byte, size)
+		_, err = lreader.Read(msg)
+		if err != nil {
+			bctx.Red("Failed to read data header")
+			return err
+		}
+
+		if !bytes.Equal(msg, clientHandshakeCompletedBytes) {
+			bctx.Red("handshake not completed")
+			return mnet.ErrFailedToCompleteHandshake
+		}
+
+		break
+	}
+
+	bctx.Info("handshake completed")
+	return nil
 }
 
 func (cn *socketClient) close() error {
@@ -400,6 +388,11 @@ func (cn *socketClient) reconnect(addr string) error {
 
 // getConn returns net.Conn for giving addr.
 func (cn *socketClient) getConn(addr string) (net.Conn, error) {
+	bctx := historySrc.FromTitle("socketClient.getConn")
+	defer bctx.Done()
+
+	bctx.With("client", cn.id).With("network", cn.nid).With("protocol", "tcp")
+
 	var err error
 	var conn net.Conn
 	var hs ws.Handshake
@@ -409,17 +402,11 @@ func (cn *socketClient) getConn(addr string) (net.Conn, error) {
 	for {
 		conn, _, hs, err = cn.dialer.Dial(context.Background(), addr)
 		if err != nil {
-			cn.metrics.Emit(
-				metrics.Error(err),
-				metrics.WithID(cn.id),
-				metrics.With("addr", addr),
-				metrics.With("network", cn.nid),
-				metrics.With("type", "tcp"),
-				metrics.Message("Connection: failed to connect"),
-			)
+			bctx.Error(err, "Failed to connect to server")
 
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
 				if lastSleep >= mnet.MaxTemporarySleep {
+					bctx.Red("Failed to connect to server with expired retries").With("err", err)
 					return nil, err
 				}
 
