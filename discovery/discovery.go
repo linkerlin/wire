@@ -18,11 +18,10 @@ import (
 
 	"regexp"
 
-	"github.com/influx6/faux/metrics"
+	"github.com/gokit/history"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/msocks"
 	"github.com/influx6/mnet/mtcp"
-	"github.com/satori/go.uuid"
 )
 
 //*****************************************************************************
@@ -40,24 +39,24 @@ type ObservationCenter struct {
 // details necessary information provided by the user has needed for
 // representing giving node as necessary within the network.
 type ServiceMeta struct {
-	Addr     string `json:"addr"`
 	Secret   string `json:"secret"`
 	Region   string `json:"region"`
-	Protocol string `json:"protocol"`
-	Service  string `json:"service"`
+	Addr     string `json:"addr,omitempty"`
+	Protocol string `json:"protocol,omitempty"`
+	Service  string `json:"service,omitempty"`
 
 	// Meta is a map of key-values which is service provided for interested services
 	// to do what they deem suited with. Must not be large.
-	Meta mnet.Meta `json:"meta"`
+	Meta mnet.Meta `json:"meta,omitempty"`
 
 	// Servers contains known discovery servers which is to be shared to
 	// other discovery servers.
-	Servers []ObservationCenter `json:"server"`
+	Servers []ObservationCenter `json:"server,omitempty"`
 
 	// Interests defines giving service names in full or in regular expression
 	// format which gets matched when a new list of ServiceReports are sent, will
 	// be filtered to match interests if there are any listed.
-	Interests []string `json:"interests"`
+	Interests []string `json:"interests,omitempty"`
 }
 
 // DiscoveryReport embodies the reports and discovery server nodes known to the
@@ -87,9 +86,9 @@ type ServiceReport struct {
 //  Discovery ServerNode
 //*****************************************************************************
 
-// ReadyAction defines a function called when a giving node has completed
+// readyAction defines a function called when a giving node has completed
 // it's handshake process and is ready for use.
-type ReadyAction func(*Node)
+type readyAction func(*Node) error
 
 // Node embodies data related to a giving service within a giving region.
 type Node struct {
@@ -97,10 +96,11 @@ type Node struct {
 	Observer  bool
 	Pings     int64
 	Pongs     int64
-	Info      mnet.Info
-	Meta      ServiceMeta
+	info      mnet.Info
+	meta      ServiceMeta
 	c         *mnet.Client
 	interests []*regexp.Regexp
+	logs      history.Ctx
 
 	pings    *time.Timer
 	ll       sync.Mutex
@@ -111,51 +111,98 @@ type Node struct {
 // Serve receives a giving mnet.Client and retrieves necessary information from
 // connection, then begins liveness/health checks of giving service, till either
 // service is closed or misses to many ping requests from node.
-func (n *Node) Serve(c mnet.Client, ready ReadyAction) error {
+func (n *Node) Serve(c mnet.Client, ready readyAction) error {
 	n.c = &c
-	n.id = uuid.NewV4().String()
+	n.id = c.ID
+
+	addr, err := c.RemoteAddr()
+	if err != nil {
+		n.logs.Error(err, "failed to get new client remote address")
+		return err
+	}
+
+	n.logs = history.WithTitle("discoveryServer.Node").
+		WithTags("discovery.Server.Node", "Node.NewNode").
+		With("node.id", c.ID).With("remote-addr", addr)
+
+	n.ll.Lock()
+	n.lastLive = time.Now()
+	n.ll.Unlock()
 
 	if c.IsCluster() {
-		return n.serveCluser(c, ready)
+		return n.serveCluster(c, ready)
 	}
+
+	ctx := n.logs.WithTitle("discoveryServer.Node.serve")
 
 	// Attempt to read handshake from from client.
 	handshake, err := n.readFor(metaWait)
 	if err != nil {
+		ctx.Error(err, "failed to receive meta info before timeout")
+		ctx.Red("node.serve fail")
 		return err
 	}
 
+	ctx.Info("Node initiating handshake policy")
+
 	// If this is a observing client, initialize observation logic.
 	if bytes.HasPrefix(handshake, obsHandshakeHeader) {
+		ctx.Info("Node initializing as Observer")
+
 		if err := n.receiveObserve(bytes.TrimPrefix(handshake, obsHandshakeHeader)); err != nil {
+			ctx.Error(err, "failed to process service handshake process as Observer")
+			ctx.Red("node.serve fail")
 			return err
 		}
+
+		n.logs.With("node.protocol", "service")
 	}
 
 	// If this is a service providing client, initialize service provider logic.
 	if bytes.HasPrefix(handshake, srvHandshakeHeader) {
+		ctx.Info("Node initializing as Service")
+
 		if err := n.receiveService(bytes.TrimPrefix(handshake, srvHandshakeHeader)); err != nil {
+			ctx.Error(err, "failed to process service handshake process as Service")
+			ctx.Red("node.serve fail")
 			return err
 		}
+
+		n.logs.With("node.protocol", "observer")
 	}
+
+	ctx = n.logs.With("node-meta", n.meta)
 
 	// Send Handshake completion signal
 	if err := n.sendHandshakeDone(); err != nil {
+		ctx.Error(err, "failed to send handshake completion message")
+		ctx.Red("node.serve fail")
 		return err
 	}
 
 	n.pings = time.NewTimer(pingInterval)
 
+	ctx.Info("Node handshake completed")
+
 	// Execute ready Action to notify we are live.
-	ready(n)
+	if err := ready(n); err != nil {
+		ctx.Error(err, "node failed registration")
+		return err
+	}
+
+	ctx.Info("node registered")
 
 	n.readUntilClose()
 	return nil
 }
 
-func (n *Node) serveCluser(c mnet.Client, ready ReadyAction) error {
+func (n *Node) serveCluster(c mnet.Client, ready readyAction) error {
+	ctx := n.logs.WithTitle("discoveryServer.Node.serveCluster")
+
 	addr, err := n.srv.Addrs()
 	if err != nil {
+		ctx.Error(err, "failed to get client addrs")
+		ctx.Red("node.serveCluster fail")
 		return err
 	}
 
@@ -167,53 +214,44 @@ func (n *Node) serveCluser(c mnet.Client, ready ReadyAction) error {
 		Protocol: n.srv.protocol,
 	})
 
-	n.Meta = meta
+	n.meta = meta
+
+	ctx.Info("Node cluster initializing as handshake policy")
 
 	if err = n.sendMeta(meta); err != nil {
+		ctx.Error(err, "failed to send meta for node")
+		ctx.Red("node.serveCluster fail")
 		return err
 	}
 
 	// Attempt to read handshake from from client.
 	handshake, err := n.readFor(metaWait)
 	if err != nil {
+		ctx.Error(err, "failed to send meta for node")
+		ctx.Red("node.serveCluster fail")
 		return err
 	}
 
 	if !bytes.Equal(handshake, handshakeDone) {
+		ctx.Error(err, "failed to receive handshake completion message")
+		ctx.Red("node.serve fail")
 		return ErrNoHandshakeCompletion
 	}
 
 	n.pings = time.NewTimer(pingInterval)
 
+	ctx.Info("cluster handshake completed")
+
 	// Execute ready Action to notify we are live.
-	ready(n)
+	if err := ready(n); err != nil {
+		ctx.Error(err, "node failed registration")
+		return err
+	}
+
+	ctx.Info("cluster node registered")
 
 	n.readUntilClose()
 	return nil
-}
-
-func (n *Node) accepted(rs ServiceReport) bool {
-	for _, intent := range n.interests {
-		if intent.MatchString(rs.Service.Service) {
-			return true
-		}
-	}
-	return false
-}
-
-func (n *Node) filterReports(rs []ServiceReport) []ServiceReport {
-	rx := make([]ServiceReport, len(rs))
-
-	var ind int
-	for _, item := range rs {
-		if !n.accepted(item) {
-			continue
-		}
-		rx[ind] = item
-		ind++
-	}
-
-	return rx[0:ind]
 }
 
 func (n *Node) buildInterests(intents []string) error {
@@ -250,9 +288,9 @@ func (n *Node) receiveService(data []byte) error {
 		}
 	}
 
-	n.Meta = service
+	n.meta = service
 
-	n.srv.AddClusters(n.Meta.Servers)
+	n.srv.AddClusters(n.meta.Servers)
 	return nil
 }
 
@@ -274,10 +312,10 @@ func (n *Node) receiveObserve(data []byte) error {
 		}
 	}
 
-	n.Meta = service
+	n.meta = service
 	n.Observer = true
 
-	n.srv.AddClusters(n.Meta.Servers)
+	n.srv.AddClusters(n.meta.Servers)
 	return nil
 }
 
@@ -425,6 +463,34 @@ func (n *Node) sendStats(stats []ServiceReport) error {
 	return nil
 }
 
+func (n *Node) filterReports(rs []ServiceReport) []ServiceReport {
+	rx := make([]ServiceReport, len(rs))
+
+	var ind int
+	for _, item := range rs {
+		if !n.accepted(item) {
+			continue
+		}
+		rx[ind] = item
+		ind++
+	}
+
+	return rx[0:ind]
+}
+
+func (n *Node) accepted(rs ServiceReport) bool {
+	if len(n.interests) == 0 {
+		return true
+	}
+
+	for _, intent := range n.interests {
+		if intent.MatchString(rs.Service.Service) {
+			return true
+		}
+	}
+	return false
+}
+
 func (n *Node) sendMeta(srv ServiceMeta) error {
 	metaJSON, err := json.Marshal(srv)
 	if err != nil {
@@ -496,6 +562,24 @@ func (n *Node) sendHandshakeDone() error {
 	return n.c.Flush()
 }
 
+func (n *Node) sendPong() error {
+	atomic.AddInt64(&n.Pongs, 1)
+	w, err := n.c.Write(len(pongs))
+	if err != nil {
+		return err
+	}
+
+	if _, err = w.Write(pongs); err != nil {
+		return err
+	}
+
+	if err = w.Close(); err != nil {
+		return err
+	}
+
+	return n.c.Flush()
+}
+
 func (n *Node) sendPing() error {
 	atomic.AddInt64(&n.Pings, 1)
 	w, err := n.c.Write(len(pings))
@@ -522,8 +606,8 @@ func (n *Node) Stat() ServiceReport {
 	n.ll.Unlock()
 
 	return ServiceReport{
-		Service:    n.Meta,
-		ClientInfo: n.Info,
+		Service:    n.meta,
+		ClientInfo: n.info,
 		LastSeen:   lastLive,
 		NodeInfo:   n.c.Info(),
 		Alive:      time.Now().Sub(lastLive) < maxLastLiveness,
@@ -532,12 +616,14 @@ func (n *Node) Stat() ServiceReport {
 
 func (n *Node) slowRunner() bool {
 	pings := atomic.LoadInt64(&n.Pings)
-	pongs := atomic.LoadInt64(&n.Pings)
+	pongs := atomic.LoadInt64(&n.Pongs)
 	diff := pings - pongs
 
 	n.ll.Lock()
 	lastLive := n.lastLive
 	n.ll.Unlock()
+
+	since := time.Since(lastLive)
 
 	// if the ping-pong state falls within maximum allowed difference,
 	// return true to have connection killed.
@@ -547,7 +633,7 @@ func (n *Node) slowRunner() bool {
 
 	// if the its a service and last service liveness was last updated 30min,
 	// then return true to have connection killed.
-	if !!n.Observer && time.Now().Sub(lastLive) > maxLastLiveness {
+	if !!n.Observer && since > maxLastLiveness {
 		return true
 	}
 
@@ -555,27 +641,39 @@ func (n *Node) slowRunner() bool {
 }
 
 func (n *Node) readUntilClose() {
+	logctx := n.logs.WithTitle("Node.readUntilClose")
+
 	for {
 		select {
 		case _, ok := <-n.pings.C:
 			if !ok {
+				logctx.Red("node is closing connection, ping timer closed")
 				return
 			}
 
 			if err := n.sendPing(); err != nil {
+				logctx.Error(err, "ping delivery error")
 				n.c.Close()
+				logctx.Red("node is closing connection")
 				return
 			}
 		default:
 			if n.slowRunner() {
+				logctx.Red("slow node found, closing")
 				n.c.Close()
+				logctx.Red("node is closing connection")
 				return
 			}
+
+			lastPing := atomic.LoadInt64(&n.Pings)
+			lastPong := atomic.LoadInt64(&n.Pongs)
 
 			msg, err := n.c.Read()
 			if err != nil {
 				if err != mnet.ErrNoDataYet {
+					logctx.WithTitle("Node.readUntilClose").Error(err, "read error")
 					n.c.Close()
+					logctx.Red("node is closing connection")
 					return
 				}
 
@@ -583,23 +681,44 @@ func (n *Node) readUntilClose() {
 				continue
 			}
 
+			datalog := logctx.WithFields(history.Attrs{
+				"data":       string(msg),
+				"last_pings": lastPing,
+				"last_pongs": lastPong,
+			}).Info("node received message")
+
 			// if we have pending data awaiting writing then flush that first
 			// since we have packed enough by now atleast.
 			if n.c.HasPending() {
 				if err := n.c.Flush(); err != nil {
+					datalog.Error(err, "failed to flush node data")
+					datalog.Red("node is closing connection")
 					n.c.Close()
 					return
 				}
 			}
 
+			if bytes.Equal(msg, pings) && n.c.IsCluster() {
+				atomic.AddInt64(&n.Pongs, 1)
+				if err := n.sendPong(); err != nil {
+					datalog.Error(err, "pong delivery error")
+					datalog.Red("node is closing connection")
+					n.c.Close()
+					return
+				}
+
+				continue
+			}
+
 			if bytes.Equal(msg, pongs) {
+				datalog.Info("node received pong response")
 				atomic.AddInt64(&n.Pongs, 1)
 				continue
 			}
 
-			// if its not an observer and we have liveness, then
-			// awesome.
+			// if its not an observer and we have liveness, update last live time.
 			if bytes.Equal(msg, srvLive) && !!n.Observer {
+				datalog.Info("node received liveliness update status")
 				n.ll.Lock()
 				n.lastLive = time.Now()
 				n.ll.Unlock()
@@ -607,28 +726,45 @@ func (n *Node) readUntilClose() {
 			}
 
 			if bytes.Equal(msg, recordStatRes) && n.c.IsCluster() {
+				datalog.Info("node cluster record status response from server")
 				n.updateStatsFromCluster(bytes.TrimPrefix(msg, recordStatRes))
 				continue
 			}
 
 			if bytes.Equal(msg, recordStats) {
+				datalog.Info("node received request for server stats records")
 				stats := n.srv.stats(n.id)
-				n.sendStats(stats)
+				if err := n.sendStats(stats); err != nil {
+					datalog.Error(err, "node failed to deliver server stats records")
+					datalog.Red("node is closing connection")
+					return
+				}
 				continue
 			}
 
 			if bytes.Equal(msg, handshakeRescue) {
-				n.sendHandshakeDone()
+				datalog.Info("node received request handshake rescue request")
+				if err := n.sendHandshakeDone(); err != nil {
+					datalog.Error(err, "node failed to deliver handshake rescue sequence")
+					datalog.Red("node is closing connection")
+					return
+				}
 				continue
 			}
 
 			if bytes.Equal(msg, clusterStats) {
-				n.sendClusters()
+				datalog.Info("node received request for cluster info")
+				if err := n.sendClusters(); err != nil {
+					datalog.Error(err, "node failed to deliver cluster response")
+					datalog.Red("node is closing connection")
+					return
+				}
 				continue
 			}
 
-			// received an unknown message, so kill funny connection.
+			datalog.Red("dangerous message received")
 			n.c.Close()
+			datalog.Yellow("node is closing connection")
 			return
 		}
 	}
@@ -642,9 +778,8 @@ func (n *Node) readUntilClose() {
 // of available services all marked with giving tags or pre-selected values.
 type Service struct {
 	Addr     string
-	TLS      *tls.Config
 	Meta     mnet.Meta
-	Metrics  metrics.Metrics
+	TLS      *tls.Config
 	Clusters []ObservationCenter
 
 	cml           sync.RWMutex
@@ -696,10 +831,6 @@ func (s *Service) Start(ctx context.Context) error {
 	}
 	s.nl.Unlock()
 
-	if s.Metrics == nil {
-		s.Metrics = metrics.New()
-	}
-
 	uri, err := url.Parse(s.Addr)
 	if err != nil {
 		return err
@@ -720,7 +851,6 @@ func (s *Service) Start(ctx context.Context) error {
 		tcpnet.TLS = s.TLS
 		tcpnet.Meta = s.Meta
 		tcpnet.Addr = uri.Host
-		tcpnet.Metrics = s.Metrics
 		tcpnet.Handler = s.serveClient
 		net = &tcpnet
 	case "ws":
@@ -728,7 +858,6 @@ func (s *Service) Start(ctx context.Context) error {
 		msn.TLS = s.TLS
 		msn.Meta = s.Meta
 		msn.Addr = uri.Host
-		msn.Metrics = s.Metrics
 		msn.Handler = s.serveClient
 		net = &msn
 	default:
@@ -775,11 +904,7 @@ func (s *Service) AddClusterWith(csv ObservationCenter) error {
 func (s *Service) AddClusters(csv []ObservationCenter) {
 	for _, ob := range csv {
 		if err := s.AddClusterWith(ob); err != nil {
-			s.Metrics.Emit(
-				metrics.Error(err),
-				metrics.With("data", ob),
-				metrics.Message("Failed to add cluster"),
-			)
+
 		}
 	}
 }
@@ -820,8 +945,10 @@ func (s *Service) stats(id string) []ServiceReport {
 		if node.id == id {
 			continue
 		}
+
 		stats = append(stats, node.Stat())
 	}
+
 	return stats
 }
 
@@ -831,44 +958,34 @@ func (s *Service) serveClient(c mnet.Client) error {
 	node := new(Node)
 	node.srv = s
 
-	defer func() {
-		stats := s.stats(node.id)
+	logctx := history.WithTitle("discoveryServer.Service.serveClient").With("id", c.ID)
+
+	defer func(nd *Node) {
+
+		logctx.Info("server node is shutting down")
+
+		// Delete observer.
+		if nd.Observer {
+			logctx.Info("node was an observer")
+
+			s.ml.Lock()
+			defer s.ml.Unlock()
+
+			delete(s.observers, nd.meta.Addr)
+			logctx.Info("node has being deregistered")
+			return
+		}
+
+		stats := s.stats(nd.id)
+
+		logctx.With("stats", stats).Info("Notify nodes of new stats")
 
 		s.ml.Lock()
 		defer s.ml.Unlock()
 
-		if node.Observer {
-			// Delete observer.
-			delete(s.observers, node.Meta.Addr)
-			return
-		}
+		delete(s.nodes, nd.meta.Addr)
 
-		delete(s.nodes, node.Meta.Addr)
-
-		// Send stats to all existing observers.
-		for _, observer := range s.observers {
-			observer.sendStats(stats)
-		}
-
-		// Send stats to all existing nodes.
-		for _, nob := range s.nodes {
-			nob.sendStats(stats)
-		}
-	}()
-
-	return node.Serve(c, func(node *Node) {
-		stats := s.stats(node.id)
-		node.sendStats(stats)
-
-		s.ml.Lock()
-		defer s.ml.Unlock()
-
-		if node.Observer {
-			s.observers[node.Meta.Addr] = node
-			return
-		}
-
-		stats = append(stats, node.Stat())
+		logctx.Info("node has being deregistered")
 
 		// Send stats to all existing observers.
 		for _, observer := range s.observers {
@@ -880,6 +997,46 @@ func (s *Service) serveClient(c mnet.Client) error {
 			nob.sendStats(stats)
 		}
 
-		s.nodes[node.Meta.Addr] = node
+		logctx.Info("notified all nodes and observers")
+	}(node)
+
+	return node.Serve(c, func(nd *Node) error {
+		stats := s.stats(nd.id)
+
+		logctx = logctx.WithTitle("discoveryServer.Service.node.Serve").
+			With("node-id", nd.id).
+			With("stats", stats)
+
+		if err := nd.sendStats(stats); err != nil {
+			logctx.Error(err, "failed to send stats to node")
+			nd.c.Close()
+			return err
+		}
+
+		s.ml.Lock()
+		defer s.ml.Unlock()
+
+		if nd.Observer {
+			s.observers[nd.meta.Addr] = nd
+			return nil
+		}
+
+		stats = append(stats, nd.Stat())
+
+		// Send stats to all existing observers.
+		for _, observer := range s.observers {
+			observer.sendStats(stats)
+		}
+
+		logctx.Info("sending updated stats to clusters").With("stats", stats)
+
+		// Send stats to all existing nodes.
+		for _, nob := range s.nodes {
+			nob.sendStats(stats)
+		}
+
+		logctx.Info("server node is registered")
+		s.nodes[nd.meta.Addr] = nd
+		return nil
 	})
 }

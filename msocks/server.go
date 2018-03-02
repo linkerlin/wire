@@ -32,7 +32,6 @@ var (
 	rescueBytes                   = []byte(mnet.CRESCUE)
 	handshakeCompletedBytes       = []byte(mnet.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(mnet.ClientHandShakeCompleted)
-	serverSrc                     = history.FromTag("msocks-server")
 )
 
 //************************************************************************
@@ -133,7 +132,7 @@ func (sc *websocketServerClient) write(size int) (io.WriteCloser, error) {
 			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 			if err := sc.wsWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
-				serverSrc.FromTitle("websocketServerClient.write").Error(err, "flush failed").Red("failed to pre-flush data").Done()
+				history.WithTags("websocket-server").WithTitle("websocketServerClient.write").Error(err, "flush failed").Red("failed to pre-flush data")
 				return err
 			}
 			conn.SetWriteDeadline(time.Time{})
@@ -211,8 +210,8 @@ func (sc *websocketServerClient) serverRead() ([]byte, error) {
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := sc.handleCINFO(); err != nil {
-			sc.logs.FromTitle("websocketServerClient.write").With("client", sc.id).
-				Error(err, "failed to pre-flush data").Done()
+			sc.logs.WithTitle("websocketServerClient.write").With("client", sc.id).
+				Error(err, "failed to pre-flush data")
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -220,8 +219,8 @@ func (sc *websocketServerClient) serverRead() ([]byte, error) {
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
 		if err := sc.handleCLStatusReceive(indata); err != nil {
-			serverSrc.FromTitle("websocketServerClient.write").With("client", sc.id).
-				Error(err, "failed to receive status request").Done()
+			history.WithTags("websocket-server").WithTitle("websocketServerClient.write").With("client", sc.id).
+				Error(err, "failed to receive status request")
 			return nil, err
 		}
 		return nil, mnet.ErrNoDataYet
@@ -286,8 +285,8 @@ func (sc *websocketServerClient) flush() error {
 		conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 		if err := sc.wsWriter.Flush(); err != nil {
 			conn.SetWriteDeadline(time.Time{})
-			sc.logs.FromTitle("websocketServerClient.flush").
-				Error(err, "failed to receive status request").Done()
+			sc.logs.WithTitle("websocketServerClient.flush").
+				Error(err, "failed to receive status request")
 			return err
 		}
 		conn.SetWriteDeadline(time.Time{})
@@ -297,7 +296,7 @@ func (sc *websocketServerClient) flush() error {
 }
 
 func (sc *websocketServerClient) close() error {
-	logs := sc.logs.FromTitle("websocketServerClient.close")
+	logs := sc.logs.WithTitle("websocketServerClient.close")
 	if err := sc.isAlive(); err != nil {
 		logs.Error(err, "closing websocket node connection")
 		return err
@@ -343,21 +342,21 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
 	incoming := make([]byte, mnet.SmallestMinBufferSize)
 
-	logs := sc.logs.FromTitle("websocketServerClient.readLoop")
+	logs := sc.logs.WithTitle("websocketServerClient.readLoop")
 
 	for {
 
 		wsFrame, err := reader.NextFrame()
 		if err != nil {
-			logs.FromKV("remoteAddr", conn.RemoteAddr()).
-				Error(err, "failed to read websocket data frame").Done()
+			logs.With("remoteAddr", conn.RemoteAddr()).
+				Error(err, "failed to read websocket data frame")
 			return
 		}
 
 		frame, err := lreader.ReadHeader()
 		if err != nil {
-			logs.FromKV("remoteAddr", conn.RemoteAddr()).
-				Error(err, "failed to read data header").Done()
+			logs.With("remoteAddr", conn.RemoteAddr()).
+				Error(err, "failed to read data header")
 			return
 		}
 
@@ -365,22 +364,25 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 
 		n, err := lreader.Read(incoming)
 		if err != nil {
-			logs.FromKV("remoteAddr", conn.RemoteAddr()).
-				Error(err, "failed to read data header").Done()
+			logs.With("remoteAddr", conn.RemoteAddr()).
+				Error(err, "failed to read data header")
 			return
 		}
 
-		logs.FromKV("remoteAddr", conn.RemoteAddr()).
-			With("data", string(incoming[:n])).With("ws-frame", wsFrame).
-			With("length", n).Info("received websocket message").Done()
+		datalogs := logs.WithFields(history.Attrs{
+			"length":     n,
+			"ws-frame":   wsFrame,
+			"data":       string(incoming),
+			"remoteAddr": conn.RemoteAddr(),
+		})
+
+		datalogs.Info("received websocket message")
 
 		atomic.AddInt64(&sc.totalRead, int64(len(incoming[:n])))
 
 		// Send into go-routine (critical path)?
 		if err := sc.parser.Parse(incoming[:n]); err != nil {
-			logs.FromKV("remoteAddr", conn.RemoteAddr()).
-				With("data", string(incoming[:n])).With("ws-frame", wsFrame).
-				With("length", n).Error(err, "failed to parse data").Done()
+			datalogs.Error(err, "failed to parse data")
 			return
 		}
 	}
@@ -546,8 +548,7 @@ func (sc *websocketServerClient) sendCINFOReq() error {
 }
 
 func (sc *websocketServerClient) handshake() error {
-	logs := sc.logs.FromTitle("websocketServerClient.handshake")
-	defer logs.Done()
+	logs := sc.logs.WithTitle("websocketServerClient.handshake")
 
 	if err := sc.sendCINFOReq(); err != nil {
 		logs.Error(err, "error sending CINFO request")
@@ -793,11 +794,11 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 		n.ServerName = host
 	}
 
-	n.logs = serverSrc.With("network-id", n.ID).
+	n.logs = history.WithTags("websocket-server").With("network-id", n.ID).
 		With("serverName", n.ServerName).
 		With("addr", n.Addr)
 
-	defer n.logs.FromTitle("WebsocketNetwork.Start").Info("Started").Done()
+	defer n.logs.WithTitle("WebsocketNetwork.Start").Info("Started")
 
 	if n.TLS != nil && !n.TLS.InsecureSkipVerify {
 		n.TLS.ServerName = n.ServerName
@@ -851,9 +852,9 @@ func (n *WebsocketNetwork) Start(ctx context.Context) error {
 func (n *WebsocketNetwork) registerCluster(clusters []mnet.Info) {
 	for _, cluster := range clusters {
 		if err := n.AddCluster(cluster.ServerAddr); err != nil {
-			n.logs.FromTitle("WebsocketNetwork.registerClusters").
+			n.logs.WithTitle("WebsocketNetwork.registerClusters").
 				With("info", cluster).
-				Error(err, "failed to add cluster address").Done()
+				Error(err, "failed to add cluster address")
 		}
 	}
 }
@@ -866,11 +867,10 @@ func (n *WebsocketNetwork) AddCluster(addr string) error {
 		return nil
 	}
 
-	log := n.logs.FromTitle("WebsocketNetwork.AddCluster").With("addr", addr)
-	defer log.Done()
+	log := n.logs.WithTitle("WebsocketNetwork.AddCluster").With("addr", addr)
 
 	if n.connectedToMeByAddr(addr) {
-		log.Error(mnet.ErrAlreadyServiced, "cluster already exists").Done()
+		log.Error(mnet.ErrAlreadyServiced, "cluster already exists")
 		log.Red("failed to cluster with network")
 		return mnet.ErrAlreadyServiced
 	}
@@ -952,10 +952,9 @@ func (n *WebsocketNetwork) connectedToMe(conn net.Conn) bool {
 // AddClient adds a new websocket client through the provided
 // net.Conn.
 func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, isCluster bool) error {
-	log := n.logs.FromTitle("WebsocketNetwork.addClient").
+	log := n.logs.WithTitle("WebsocketNetwork.addClient").
 		With("remote-addr", newConn.RemoteAddr()).
 		With("local-addr", newConn.LocalAddr())
-	defer log.Done()
 
 	handshake, err := n.Upgrader.Upgrade(newConn)
 	if err != nil {
@@ -975,10 +974,9 @@ func (n *WebsocketNetwork) addClient(newConn net.Conn, policy mnet.RetryPolicy, 
 }
 
 func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mnet.RetryPolicy, isCluster bool) error {
-	log := n.logs.FromTitle("WebsocketNetwork.addWSClient").
+	log := n.logs.WithTitle("WebsocketNetwork.addWSClient").
 		With("remote-addr", conn.RemoteAddr()).
 		With("local-addr", conn.LocalAddr())
-	defer log.Done()
 
 	atomic.AddInt64(&n.totalClients, 1)
 	atomic.AddInt64(&n.totalOpened, 1)
@@ -1010,7 +1008,7 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	client.localAddr = conn.LocalAddr()
 	client.remoteAddr = conn.RemoteAddr()
 	client.parser = new(internal.TaggedMessages)
-	client.logs = n.logs.FromFields(map[string]interface{}{
+	client.logs = n.logs.WithFields(map[string]interface{}{
 		"server-addr": n.raddr,
 		"client-id":   client.id,
 		"server-id":   client.nid,
@@ -1053,13 +1051,14 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 	n.routines.Add(1)
 	go func(mc mnet.Client, addr net.Addr) {
 		defer n.routines.Done()
+
 		defer atomic.AddInt64(&n.totalClients, -1)
 		defer atomic.AddInt64(&n.totalClosed, 1)
 		defer atomic.StoreInt64(&client.closedCounter, 1)
 
 		if err := n.Handler(mc); err != nil {
 			client.logs.Error(err, "Client connection handler failed")
-			log.Red("Client handler stopped").Done()
+			log.Red("Client handler stopped")
 		}
 
 		n.cu.Lock()
@@ -1081,10 +1080,9 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy mn
 				}
 
 				log.Info("Client calling retry policy")
-				defer log.Done()
 
 				if err := policy.Retry(); err != nil {
-					log.Error(err, "Client retry failed").Done()
+					log.Error(err, "Client retry failed")
 				}
 			}()
 		}
@@ -1145,7 +1143,7 @@ func (n *WebsocketNetwork) handleConnections(ctx context.Context, stream melon.C
 	for {
 		newConn, err := stream.ReadConn()
 		if err != nil {
-			n.logs.FromTitle("WebsocketNetwork.handleConnections").Error(err, "Failed to read connection").Done()
+			n.logs.WithTitle("WebsocketNetwork.handleConnections").Error(err, "Failed to read connection")
 			if err == mlisten.ErrListenerClosed {
 				return
 			}

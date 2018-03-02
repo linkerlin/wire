@@ -30,7 +30,6 @@ var (
 
 // errors ...
 var (
-	historySrc     = history.FromTag("msocks-client")
 	ErrNoTLSConfig = errors.New("no tls.Config provided")
 )
 
@@ -132,7 +131,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 		}
 	}
 
-	network.logs = historySrc
+	network.logs = history.WithTags("websocket-client").With("id", network.id)
 	network.parser = new(internal.TaggedMessages)
 
 	c.NID = network.nid
@@ -216,8 +215,7 @@ func (cn *socketClient) handleCINFO() error {
 }
 
 func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
-	bctx := historySrc.FromTitle("socketClient.respondToINFO")
-	defer bctx.Done()
+	bctx := history.WithTags("websocket-client").WithTitle("socketClient.respondToINFO")
 
 	bctx.Info("Awaiting CINFO request from server")
 	bctx.With("client", cn.id).With("network", cn.nid)
@@ -388,10 +386,11 @@ func (cn *socketClient) reconnect(addr string) error {
 
 // getConn returns net.Conn for giving addr.
 func (cn *socketClient) getConn(addr string) (net.Conn, error) {
-	bctx := historySrc.FromTitle("socketClient.getConn")
-	defer bctx.Done()
-
-	bctx.With("client", cn.id).With("network", cn.nid).With("protocol", "tcp")
+	bctx := cn.logs.WithFields(history.Attrs{
+		"client-id": cn.id,
+		"network":   cn.nid,
+		"protocol":  "tcp",
+	})
 
 	var err error
 	var conn net.Conn

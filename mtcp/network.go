@@ -32,7 +32,6 @@ var (
 	rescueBytes                   = []byte(mnet.CRESCUE)
 	handshakeCompletedBytes       = []byte(mnet.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(mnet.ClientHandShakeCompleted)
-	serverSrc                     = history.FromTag("mtcp-server")
 )
 
 //************************************************************************
@@ -357,8 +356,7 @@ func (nc *tcpServerClient) sendCINFOReq() error {
 }
 
 func (nc *tcpServerClient) handshake() error {
-	logs := nc.logs.FromTitle("tcpServerClient.handshake")
-	defer logs.Done()
+	logs := nc.logs.WithTitle("tcpServerClient.handshake")
 
 	if err := nc.sendCINFOReq(); err != nil {
 		logs.Error(err, "error sending CINFO request")
@@ -479,7 +477,10 @@ func (nc *tcpServerClient) handshake() error {
 }
 
 func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
+	logs := nc.logs.WithTitle("tcpServerClient.write")
+
 	if err := nc.isLive(); err != nil {
+		logs.Error(err, "client connection is closed")
 		return nil, err
 	}
 
@@ -489,10 +490,13 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 	nc.mu.RUnlock()
 
 	if conn == nil {
+		logs.Error(mnet.ErrAlreadyClosed, "client connection has no net.Conn")
 		return nil, mnet.ErrAlreadyClosed
 	}
 
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
+		logctx := logs.With("sending-size", len(data)).With("sending-data", string(data))
+
 		atomic.AddInt64(&nc.totalWritten, 1)
 		atomic.AddInt64(&nc.totalWritten, int64(len(data)))
 
@@ -500,6 +504,8 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 		defer nc.bu.Unlock()
 
 		if nc.buffWriter == nil {
+			logctx.Error(mnet.ErrAlreadyClosed, "writer connection has been closed")
+			logctx.Yellow("data unable to be written")
 			return mnet.ErrAlreadyClosed
 		}
 
@@ -517,16 +523,22 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 			if err := nc.buffWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
+				logs.Error(err, "failed to flush data")
+				logctx.Yellow("data unable to be written")
 				return err
 			}
 			conn.SetWriteDeadline(time.Time{})
 		}
 
 		if _, err := nc.buffWriter.Write(size); err != nil {
+			logs.Error(err, "failed to writer data size bytes")
+			logctx.Yellow("data unable to be written")
 			return err
 		}
 
 		if _, err := nc.buffWriter.Write(data); err != nil {
+			logs.Error(err, "failed to writer data bytes")
+			logctx.Yellow("data unable to be written")
 			return err
 		}
 
@@ -535,7 +547,10 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 }
 
 func (nc *tcpServerClient) closeConnection() error {
+	logs := nc.logs.WithTitle("tcpServerClient.closeConnection")
+
 	if err := nc.isLive(); err != nil {
+		logs.Error(err, "client already closed")
 		return err
 	}
 
@@ -545,6 +560,7 @@ func (nc *tcpServerClient) closeConnection() error {
 
 	nc.mu.Lock()
 	if nc.conn == nil {
+		logs.Yellow("client already closed")
 		return mnet.ErrAlreadyClosed
 	}
 	err := nc.conn.Close()
@@ -560,6 +576,7 @@ func (nc *tcpServerClient) closeConnection() error {
 	nc.buffWriter = nil
 	nc.bu.Unlock()
 
+	logs.Info("client closed")
 	return err
 }
 
@@ -593,30 +610,32 @@ func (nc *tcpServerClient) readLoop() {
 	connReader := bufio.NewReaderSize(cn, nc.maxWrite)
 	lreader := internal.NewLengthRecvReader(connReader, mnet.HeaderLength)
 
-	incoming := make([]byte, mnet.SmallestMinBufferSize)
+	logs := nc.logs.WithTitle("tcpServerClient.readLoop")
+
+	var incoming []byte
 
 	for {
 		frame, err := lreader.ReadHeader()
 		if err != nil {
+			logs.Error(err, "read header error")
 			return
 		}
 
 		incoming = make([]byte, frame)
 		n, err := lreader.Read(incoming)
 		if err != nil {
+			logs.Error(err, "read error")
 			return
 		}
 
 		atomic.AddInt64(&nc.totalRead, int64(len(incoming[:n])))
 
+		datalog := logs.With("data", string(incoming[:n])).Info("received data")
+
 		// Send into go-routine (critical path)?
 		if err := nc.parser.Parse(incoming[:n]); err != nil {
+			datalog.Error(err, "parser data error")
 			return
-		}
-
-		if n > mnet.SmallestMinBufferSize && n <= mnet.MinBufferSize {
-			incoming = make([]byte, mnet.MinBufferSize)
-			continue
 		}
 	}
 }
@@ -722,9 +741,11 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	n.pool = make(chan func(), 0)
 	n.clients = make(map[string]*tcpServerClient)
 
-	n.logs = serverSrc.With("network-id", n.ID).
-		With("serverName", n.ServerName).
-		With("addr", n.Addr)
+	n.logs = history.WithFields(map[string]interface{}{
+		"addr":        n.raddr,
+		"network-id":  n.ID,
+		"server-name": n.ServerName,
+	})
 
 	if n.MaxWriteSize <= 0 {
 		n.MaxWriteSize = mnet.MaxBufferSize
@@ -754,11 +775,10 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 }
 
 func (n *TCPNetwork) registerCluster(clusters []mnet.Info) {
+	logctx := n.logs.WithTitle("WebsocketNetwork.registerClusters")
 	for _, cluster := range clusters {
 		if err := n.AddCluster(cluster.ServerAddr); err != nil {
-			n.logs.FromTitle("WebsocketNetwork.registerClusters").
-				With("info", cluster).
-				Error(err, "failed to add cluster address").Done()
+			logctx.With("info", cluster).Error(err, "failed to add cluster address")
 		}
 	}
 }
@@ -766,8 +786,7 @@ func (n *TCPNetwork) registerCluster(clusters []mnet.Info) {
 func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
 
-	logs := n.logs.FromTitle("TCPNetwork.handleClose")
-	defer logs.Done()
+	logs := n.logs.WithTitle("TCPNetwork.handleClose")
 
 	<-ctx.Done()
 
@@ -787,6 +806,8 @@ func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWrite
 	if n.Hook != nil {
 		n.Hook.NetworkClosed()
 	}
+
+	logs.Info("network closed")
 }
 
 // Statistics returns statics associated with TCPNetwork.
@@ -943,7 +964,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	nc.parser = new(internal.TaggedMessages)
 	nc.buffWriter = bufio.NewWriterSize(conn, n.MaxWriteSize)
 
-	nc.logs = n.logs.FromFields(map[string]interface{}{
+	nc.logs = n.logs.WithFields(map[string]interface{}{
 		"server-addr": n.raddr,
 		"client-id":   nc.id,
 		"server-id":   nc.nid,
@@ -1000,7 +1021,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 		if policy != nil {
 			go func() {
 				if err := policy.Retry(); err != nil {
-					n.logs.Error(err, "Client retry failed").Done()
+					n.logs.Error(err, "Client retry failed")
 				}
 			}()
 		}

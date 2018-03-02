@@ -14,6 +14,8 @@ import (
 
 	"context"
 
+	"github.com/gokit/history"
+	"github.com/gokit/history/handlers/discard"
 	"github.com/influx6/faux/tests"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/certificates"
@@ -21,6 +23,7 @@ import (
 )
 
 var (
+	_      = history.SetDefaultHandlers(discard.Discard)
 	dialer = &net.Dialer{Timeout: 2 * time.Second}
 )
 

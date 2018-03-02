@@ -2,40 +2,35 @@ package discovery_test
 
 import (
 	"context"
-	"os"
+	"fmt"
 	"testing"
 
 	"sync"
 
-	"github.com/influx6/faux/metrics"
-	"github.com/influx6/faux/metrics/custom"
+	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/faux/tests"
 	"github.com/influx6/mnet/discovery"
 	"github.com/influx6/mnet/msocks"
 	"github.com/influx6/mnet/mtcp"
+
+	"github.com/gokit/history/handlers/discard"
 )
 
 var (
-	logs = metrics.New()
+	_ = history.SetDefaultHandlers(discard.Discard)
 )
 
 func TestClusteredDiscoveryServer(t *testing.T) {
-	if testing.Verbose() {
-		logs = metrics.New(custom.StackDisplay(os.Stderr))
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	addr := netutils.ResolveAddr("tcp://localhost:0")
 	addr2 := netutils.ResolveAddr("tcp://localhost:0")
 
 	var tx discovery.Service
-	tx.Metrics = logs
 	tx.Addr = addr
 
 	var tx2 discovery.Service
-	tx2.Metrics = logs
 	tx2.Addr = addr2
 
 	if err := tx.Start(ctx); err != nil {
@@ -59,17 +54,12 @@ func TestClusteredDiscoveryServer(t *testing.T) {
 }
 
 func TestAgentNode_Observer(t *testing.T) {
-	if testing.Verbose() {
-		logs = metrics.New(custom.StackDisplay(os.Stderr))
-	}
-
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	addr := netutils.ResolveAddr("tcp://localhost:0")
 
 	var tx discovery.Service
-	tx.Metrics = logs
 	tx.Addr = addr
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -78,7 +68,7 @@ func TestAgentNode_Observer(t *testing.T) {
 	}
 	tests.Passed("Should have successfully started discovery server")
 
-	service, err := discovery.Agent(logs, discovery.Intent{
+	service, err := discovery.Agent(discovery.Intent{
 		Type:       discovery.ObservingNode,
 		ServerAddr: addr,
 		Region:     "africa-west",
@@ -102,17 +92,12 @@ func TestAgentNode_Observer(t *testing.T) {
 }
 
 func TestAgentNode_Service(t *testing.T) {
-	if testing.Verbose() {
-		logs = metrics.New(custom.StackDisplay(os.Stderr))
-	}
-
 	var wg sync.WaitGroup
 	wg.Add(1)
 
 	addr := netutils.ResolveAddr("tcp://localhost:0")
 
 	var tx discovery.Service
-	tx.Metrics = logs
 	tx.Addr = addr
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -121,7 +106,7 @@ func TestAgentNode_Service(t *testing.T) {
 	}
 	tests.Passed("Should have successfully started discovery server")
 
-	service, err := discovery.Agent(logs, discovery.Intent{
+	service, err := discovery.Agent(discovery.Intent{
 		Type:        discovery.ServiceNode,
 		ServerAddr:  addr,
 		Service:     "surga",
@@ -148,19 +133,15 @@ func TestAgentNode_Service(t *testing.T) {
 }
 
 func TestAgentNode_ServiceWithObserver(t *testing.T) {
-	if testing.Verbose() {
-		logs = metrics.New(custom.StackDisplay(os.Stderr))
-	}
-
-	var serviceRes, obRes []discovery.ServiceReport
+	serviceReport := make(chan []discovery.ServiceReport, 1)
+	observerReport := make(chan []discovery.ServiceReport, 1)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 
 	addr := netutils.ResolveAddr("tcp://localhost:0")
 
 	var tx discovery.Service
-	tx.Metrics = logs
 	tx.Addr = addr
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -169,7 +150,7 @@ func TestAgentNode_ServiceWithObserver(t *testing.T) {
 	}
 	tests.Passed("Should have successfully started discovery server")
 
-	service, err := discovery.Agent(logs, discovery.Intent{
+	service, err := discovery.Agent(discovery.Intent{
 		ServerAddr:  addr,
 		Service:     "surga",
 		Secret:      "sygar-slicker",
@@ -177,8 +158,10 @@ func TestAgentNode_ServiceWithObserver(t *testing.T) {
 		Type:        discovery.ServiceNode,
 		ServiceAddr: netutils.ResolveAddr("tcp://190.23.232.12:4050"),
 		Fn: func(reports []discovery.ServiceReport) {
-			serviceRes = reports
-			wg.Done()
+			if cap(serviceReport) != len(serviceReport) {
+				serviceReport <- reports
+				fmt.Printf("Received service Report: %#q\n", reports)
+			}
 		},
 	})
 	if err != nil {
@@ -186,17 +169,19 @@ func TestAgentNode_ServiceWithObserver(t *testing.T) {
 	}
 	tests.Passed("Should have successfully started service client")
 
+	go drainChan(service.Health())
 	go drainChan(service.Disconnects())
 	go drainChan(service.CloseNotifier())
-	go drainChan(service.Health())
 
-	ob, err := discovery.Agent(logs, discovery.Intent{
+	ob, err := discovery.Agent(discovery.Intent{
 		ServerAddr: addr,
 		Region:     "africa-west",
 		Type:       discovery.ObservingNode,
 		Fn: func(reports []discovery.ServiceReport) {
-			obRes = reports
-			wg.Done()
+			if cap(observerReport) != len(observerReport) {
+				observerReport <- reports
+				fmt.Printf("Received observer Report: %#q\n", reports)
+			}
 		},
 	})
 	if err != nil {
@@ -208,16 +193,17 @@ func TestAgentNode_ServiceWithObserver(t *testing.T) {
 	go drainChan(ob.CloseNotifier())
 	go drainChan(ob.Health())
 
-	wg.Wait()
-	_ = cancel
-	//ob.Stop()
-	//service.Stop()
-	//cancel()
+	srRes := <-serviceReport
+	obRes := <-observerReport
+
+	ob.Stop()
+	service.Stop()
+	cancel()
 	tx.Wait()
 
-	if len(serviceRes) != 0 {
+	if len(srRes) != 0 {
 		tests.Info("Expected: %d", 0)
-		tests.Info("Received: %d", len(serviceRes))
+		tests.Info("Received: %d", len(srRes))
 		tests.Failed("Should have received zero registered services")
 	}
 	tests.Passed("Should have received zero registered services")
@@ -231,10 +217,6 @@ func TestAgentNode_ServiceWithObserver(t *testing.T) {
 }
 
 func TestDiscoveryProtocols(t *testing.T) {
-	if testing.Verbose() {
-		logs = metrics.New(custom.StackDisplay(os.Stderr))
-	}
-
 	specs := []struct {
 		Title       string
 		Addr        string
@@ -249,8 +231,21 @@ func TestDiscoveryProtocols(t *testing.T) {
 					return err
 				}
 
-				client.Close()
-				return nil
+				w, err := client.Write(10)
+				if err != nil {
+					return err
+				}
+
+				w.Write([]byte("DONE"))
+				if err = w.Close(); err != nil {
+					return err
+				}
+
+				if err = client.Flush(); err != nil {
+					return err
+				}
+
+				return client.Close()
 			},
 		},
 		{
@@ -262,16 +257,27 @@ func TestDiscoveryProtocols(t *testing.T) {
 					return err
 				}
 
-				client.Close()
-				return nil
+				w, err := client.Write(10)
+				if err != nil {
+					return err
+				}
+
+				w.Write([]byte("DONE"))
+				if err = w.Close(); err != nil {
+					return err
+				}
+
+				if err = client.Flush(); err != nil {
+					return err
+				}
+
+				return client.Close()
 			},
 		},
 	}
 
 	for _, spec := range specs {
 		var tx discovery.Service
-		tx.Metrics = logs
-
 		tests.Header(spec.Title)
 		ctx, cancel := context.WithCancel(context.Background())
 
@@ -285,6 +291,7 @@ func TestDiscoveryProtocols(t *testing.T) {
 
 		cancel()
 		tx.Wait()
+		tests.Passed("Should have successfully closed network")
 	}
 }
 

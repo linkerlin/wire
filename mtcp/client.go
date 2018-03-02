@@ -19,10 +19,6 @@ import (
 	uuid "github.com/satori/go.uuid"
 )
 
-var (
-	historySrc = history.FromTag("mtcp-client")
-)
-
 // ConnectOptions defines a function type used to apply given
 // changes to a *clientNetwork type.
 type ConnectOptions func(*clientNetwork)
@@ -124,6 +120,9 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	network.id = c.ID
 	network.addr = addr
 	network.parser = new(internal.TaggedMessages)
+	network.logs = history.WithTags("mtcp-client").With("id", c.ID).WithFields(map[string]interface{}{
+		"addr": addr,
+	})
 
 	c.LiveFunc = network.isLive
 	c.FlushFunc = network.flush
@@ -158,8 +157,8 @@ type clientNetwork struct {
 	keepAliveTimeout time.Duration
 
 	maxWrite int
-
-	parser *internal.TaggedMessages
+	logs     history.Ctx
+	parser   *internal.TaggedMessages
 
 	bu         sync.Mutex
 	buffWriter *bufio.Writer
@@ -404,7 +403,10 @@ func (cn *clientNetwork) flush() error {
 }
 
 func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
+	logs := cn.logs.WithTitle("clientNetwork.write")
+
 	if err := cn.isLive(); err != nil {
+		logs.Error(err, "client connection is closed")
 		return nil, err
 	}
 
@@ -414,10 +416,12 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 	cn.cu.RUnlock()
 
 	if conn == nil {
+		logs.Error(mnet.ErrAlreadyClosed, "client connection has no net.Conn")
 		return nil, mnet.ErrAlreadyClosed
 	}
 
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
+		logctx := logs.With("sending-size", len(data)).With("sending-data", string(data))
 		atomic.AddInt64(&cn.MessageWritten, 1)
 		atomic.AddInt64(&cn.totalWritten, int64(len(data)))
 
@@ -425,6 +429,8 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 		defer cn.bu.Unlock()
 
 		if cn.buffWriter == nil {
+			logctx.Error(mnet.ErrAlreadyClosed, "writer connection has been closed")
+			logctx.Yellow("data unable to be written")
 			return mnet.ErrAlreadyClosed
 		}
 
@@ -442,16 +448,22 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
 			if err := cn.buffWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
+				logs.Error(err, "failed to flush data")
+				logctx.Yellow("data unable to be written")
 				return err
 			}
 			conn.SetWriteDeadline(time.Time{})
 		}
 
 		if _, err := cn.buffWriter.Write(size); err != nil {
+			logs.Error(err, "failed to writer data size bytes")
+			logctx.Yellow("data unable to be written")
 			return err
 		}
 
 		if _, err := cn.buffWriter.Write(data); err != nil {
+			logs.Error(err, "failed to writer data bytes")
+			logctx.Yellow("data unable to be written")
 			return err
 		}
 
@@ -488,25 +500,31 @@ func (cn *clientNetwork) readLoop(conn net.Conn) {
 	connReader := bufio.NewReaderSize(conn, cn.maxWrite)
 	lreader := internal.NewLengthRecvReader(connReader, mnet.HeaderLength)
 
-	incoming := make([]byte, mnet.SmallestMinBufferSize)
+	var incoming []byte
+
+	logctx := cn.logs.WithTitle("clientNetwork.readLoop")
 
 	for {
 		frame, err := lreader.ReadHeader()
 		if err != nil {
+			logctx.Error(err, "read header error")
 			return
 		}
 
 		incoming = make([]byte, frame)
-
 		n, err := lreader.Read(incoming)
 		if err != nil {
+			logctx.Error(err, "read body error")
 			return
 		}
+
+		datalog := logctx.With("data", string(incoming)).Info("client received data")
 
 		atomic.AddInt64(&cn.totalRead, int64(len(incoming[:n])))
 
 		// Send into go-routine (critical path)?
 		if err := cn.parser.Parse(incoming[:n]); err != nil {
+			datalog.Error(err, "read parser")
 			return
 		}
 	}
@@ -586,6 +604,10 @@ func (cn *clientNetwork) reconnect(altAddr string) error {
 	cn.localAddr = conn.LocalAddr()
 	cn.remoteAddr = conn.RemoteAddr()
 	cn.cu.Unlock()
+
+	cn.logs.With("local-addr", cn.localAddr)
+	cn.logs.With("remote-addr", cn.remoteAddr)
+	cn.logs.With("addr", cn.remoteAddr.String())
 
 	connReader := bufio.NewReaderSize(conn, mnet.MaxBufferSize)
 	if err := cn.respondToINFO(conn, connReader); err != nil {

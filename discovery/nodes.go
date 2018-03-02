@@ -13,7 +13,7 @@ import (
 
 	"sync/atomic"
 
-	"github.com/influx6/faux/metrics"
+	"github.com/gokit/history"
 	"github.com/influx6/mnet"
 	"github.com/influx6/mnet/msocks"
 	"github.com/influx6/mnet/mtcp"
@@ -23,13 +23,6 @@ import (
 var (
 	ErrNoNodeResponseRecv    = errors.New("failed to receive cluster nodes")
 	ErrNoHandshakeCompletion = errors.New("failed to receive handshake completion signal")
-)
-
-// constants for service and observer nodes.
-const (
-	maxReconn          = 10
-	statUpdateInterval = time.Second * 3
-	reconnWaitInterval = time.Second * 1
 )
 
 //*****************************************************************************
@@ -46,6 +39,17 @@ const (
 	ServiceNode
 	ObservingNode
 )
+
+// String returns giving string name of node type.
+func (n NodeType) String() string {
+	switch n {
+	case ServiceNode:
+		return "ServiceNode"
+	case ObservingNode:
+		return "ObservingNode"
+	}
+	return "UnknownNode"
+}
 
 //*****************************************************************************
 //  Event Function Types
@@ -199,13 +203,12 @@ type AgentNode interface {
 
 // Declare returns a new instance of a discoveryAgent with provided details
 // which will be shared with the discovery server on the discovery address.
-func Agent(m metrics.Metrics, intent Intent) (AgentNode, error) {
+func Agent(intent Intent) (AgentNode, error) {
 	if err := intent.Validate(); err != nil {
 		return nil, err
 	}
 
 	srv := &discoveryAgent{
-		m:       m,
 		intent:  intent,
 		obKnown: make(map[string]struct{}),
 		stats:   time.NewTimer(statsInterval),
@@ -222,7 +225,8 @@ func Agent(m metrics.Metrics, intent Intent) (AgentNode, error) {
 type discoveryAgent struct {
 	intent Intent
 	stats  *time.Timer
-	m      metrics.Metrics
+
+	logs history.Ctx
 
 	chinitd       bool
 	healtChan     chan struct{}
@@ -336,24 +340,40 @@ func (srv *discoveryAgent) isDisconnected() bool {
 }
 
 func (srv *discoveryAgent) serve() error {
+	srv.logs = history.WithFields(history.Attrs{
+		"intent":         srv.intent,
+		"agent.protocol": srv.intent.Type.String(),
+	})
+
+	logctx := srv.logs.WithTitle("discoveryAgent.serve")
+
 	if srv.isClosed() {
+		logctx.Error(mnet.ErrAlreadyClosed, "discovery agent has being closed")
 		return mnet.ErrAlreadyClosed
 	}
 
+	atomic.StoreInt64(&srv.disconneted, 0)
+	atomic.StoreInt64(&srv.closed, 0)
+
 	if !srv.chinitd {
+		logctx.Info("initializing discoveryAgent channels")
+
 		srv.chinitd = true
 		srv.healtChan = make(chan struct{})
 		srv.closedChan = make(chan struct{})
 		srv.reconnectChan = make(chan struct{})
 	}
 
-	atomic.StoreInt64(&srv.disconneted, 0)
+	logctx.Info("connect to discovery service server")
 
 	if err := srv.connectToServer(); err != nil {
+		logctx.Error(err, "failed to connect to server")
+
 		go func() {
 			if srv.isClosed() {
 				return
 			}
+
 			select {
 			case <-srv.closedChan:
 				return
@@ -361,14 +381,19 @@ func (srv *discoveryAgent) serve() error {
 				return
 			}
 		}()
+
 		return err
 	}
 
+	logctx.Info("node initiating handshake policy process")
 	if err := srv.handshake(); err != nil {
+		logctx.Error(err, "failed to finish handshake policy for discovery agent")
+
 		go func() {
 			if srv.isClosed() {
 				return
 			}
+
 			select {
 			case <-srv.closedChan:
 				return
@@ -389,13 +414,17 @@ func (srv *discoveryAgent) serve() error {
 			}
 		}()
 
+		logctx.Info("discovery agent read cycle has begun")
 		srv.readUntilClose()
+		logctx.Info("discovery agent read cycle ended")
 	}()
 
+	logctx.Info("discovery agent is ready")
 	return nil
 }
 
 func (srv *discoveryAgent) connectToServer() error {
+
 	srv.cl.Lock()
 	c := srv.c
 	srv.cl.Unlock()
@@ -417,7 +446,13 @@ func (srv *discoveryAgent) connectToServer() error {
 	item := nodes[0]
 	nodes[0] = nodes[len(nodes)-1]
 
+	logs := srv.logs.With("node", item)
+
+	logs.Info("selected next node for server")
+
 	if err := srv.connectToServerAddr(item.Addr); err != nil {
+		srv.logs.Error(err, "failed to connect to node")
+		srv.logs.Yellow("node failed to reconnect")
 		return err
 	}
 
@@ -425,23 +460,30 @@ func (srv *discoveryAgent) connectToServer() error {
 }
 
 func (srv *discoveryAgent) connectToServerAddr(addr string) error {
+	logctx := srv.logs.WithTitle("discoveryAgent.connectToServerAddr").With("server-addr", addr)
+
 	uri, err := url.Parse(addr)
 	if err != nil {
+		logctx.Error(err, "failed to parse server address")
 		return err
 	}
+
+	logctx = logctx.With("server-scheme", uri.Scheme).With("server-host", uri.Host)
 
 	var c mnet.Client
 
 	switch uri.Scheme {
 	case "tcp":
-		c, err = mtcp.Connect(uri.Host, mtcp.TLSConfig(srv.intent.TLS), mtcp.Metrics(srv.m))
+		c, err = mtcp.Connect(uri.Host, mtcp.TLSConfig(srv.intent.TLS))
 	case "ws":
-		c, err = msocks.Connect(uri.Host, msocks.TLSConfig(srv.intent.TLS), msocks.Metrics(srv.m))
+		c, err = msocks.Connect(uri.Host, msocks.TLSConfig(srv.intent.TLS))
 	default:
+		logctx.Error(ErrUnknownScheme, "received address of unknown scheme")
 		return ErrUnknownScheme
 	}
 
 	if err != nil {
+		logctx.Error(err, "failed to connect to discovery service server")
 		return err
 	}
 
@@ -455,12 +497,14 @@ func (srv *discoveryAgent) connectToServerAddr(addr string) error {
 
 	var meta ServiceMeta
 	meta.Meta = srv.intent.Meta
-	meta.Protocol = srv.protocol
+	meta.Protocol = uri.Scheme
 	meta.Secret = srv.intent.Secret
 	meta.Region = srv.intent.Region
 	meta.Service = srv.intent.Service
 	meta.Addr = srv.intent.ServiceAddr
 	meta.Interests = srv.intent.Interests
+
+	srv.logs.With("meta", meta).With("id", c.ID).With("protocol", uri.Scheme)
 
 	srv.cl.Lock()
 	srv.c = &c
@@ -468,43 +512,50 @@ func (srv *discoveryAgent) connectToServerAddr(addr string) error {
 	srv.protocol = uri.Scheme
 	srv.cl.Unlock()
 
+	logctx.Info("connection ready")
+
 	return nil
 }
 
 func (srv *discoveryAgent) handshake() error {
+	logCtx := srv.logs.WithTitle("discoveryAgent.handshake")
+
+	logCtx.Info("handshake step: send agent service meta information")
 	if err := srv.deliverMeta(); err != nil {
+		logCtx.Error(err, "failed to deliver meta info")
 		return err
 	}
 
+	logCtx.Info("handshake step: read handshake complete signal")
 	if err := srv.readHandshakeComplete(); err != nil {
+		logCtx.Error(err, "failed to read handshake complete signal")
 		return err
 	}
 
+	logCtx.Info("handshake step: read server service stats")
 	if err := srv.readStats(); err != nil {
+		logCtx.Error(err, "failed to read read initial server stats")
 		return err
 	}
 
-	//if err := srv.requestNodes(); err != nil {
-	//	return err
-	//}
-	//
-	//if err := srv.readNodes(); err != nil {
-	//	return err
-	//}
-
+	logCtx.Info("handshake completed")
 	return nil
 }
 
 func (srv *discoveryAgent) readUntilClose() {
 	defer atomic.StoreInt64(&srv.disconneted, 1)
 
+	logCtx := srv.logs.WithTitle("discoveryAgent.readUntilClose")
+
 	for {
 		select {
 		case <-srv.stats.C:
 			srv.stats.Reset(statsInterval)
 			if err := srv.requestStats(); err != nil {
+				logCtx.Error(err, "failed to request server stats")
 				return
 			}
+
 		default:
 			msg, err := srv.c.Read()
 			if err != nil {
@@ -515,20 +566,28 @@ func (srv *discoveryAgent) readUntilClose() {
 			}
 
 			if bytes.HasPrefix(msg, pings) {
-				srv.sendPongs()
+				logCtx.Info("discovery agent received received ping checkup")
+				if err := srv.sendPongs(); err != nil {
+					logCtx.Error(err, "discovery agent failed to send pong response")
+					return
+				}
 				continue
 			}
 
 			if bytes.HasPrefix(msg, recordStatRes) {
+				logCtx.Info("discovery agent received received sever stats")
 				msg = bytes.TrimPrefix(msg, recordStatRes)
 				if err := srv.updateStats(msg); err != nil {
+					logCtx.Error(err, "discovery agent failed to process server stats")
 					return
 				}
 				continue
 			}
 
 			if bytes.Equal(msg, healthReq) && srv.intent.Type == ServiceNode {
+				logCtx.Info("discovery agent received health checkup request")
 				srv.healtChan <- struct{}{}
+				logCtx.Info("discovery agent sent health checkup through channel")
 			}
 		}
 	}
@@ -594,47 +653,59 @@ func (srv *discoveryAgent) updateStats(msg []byte) error {
 }
 
 func (srv *discoveryAgent) deliverMeta() error {
+	logCtx := srv.logs.WithTitle("discoveryAgent.deliverMeta")
+
 	var header []byte
 
 	switch srv.intent.Type {
 	case ServiceNode:
-		header = obsHandshakeHeader
-	case ObservingNode:
+		logCtx.Info("initializing agent has as Service")
 		header = srvHandshakeHeader
+	case ObservingNode:
+		logCtx.Info("initializing agent has as Observer")
+		header = obsHandshakeHeader
 	}
 
 	metaJSON, err := json.Marshal(srv.srv)
 	if err != nil {
+		logCtx.Error(err, "failed to marshal agent meta into json")
 		return err
 	}
 
 	writer, err := srv.c.Write(len(metaJSON) + len(header))
 	if err != nil {
+		logCtx.Error(err, "failed to acquire writer for data")
 		return err
 	}
 
 	hi, err := writer.Write(header)
 	if err != nil {
+		logCtx.Error(err, "failed to write header")
 		return err
 	}
 
 	if hi != len(header) {
+		logCtx.Error(err, "failed to fully write header")
 		return io.ErrShortWrite
 	}
 
 	ni, err := writer.Write(metaJSON)
 	if err != nil {
+		logCtx.Error(err, "failed to write body")
 		return err
 	}
 
 	if ni != len(metaJSON) {
+		logCtx.Error(err, "failed to fully write body")
 		return io.ErrShortWrite
 	}
 
 	if err = writer.Close(); err != nil {
+		logCtx.Error(err, "failed to fully flush header and body data")
 		return err
 	}
 
+	logCtx.Info("flushing all data written to connection")
 	return srv.c.Flush()
 }
 
@@ -708,7 +779,7 @@ func (srv *discoveryAgent) requestNodes() error {
 }
 
 func (srv *discoveryAgent) readStats() error {
-	msg, err := srv.readUntil(time.Second * 5)
+	msg, err := srv.readUntil(statusReadWait)
 	if err != nil {
 		return err
 	}
@@ -722,7 +793,7 @@ func (srv *discoveryAgent) readStats() error {
 }
 
 func (srv *discoveryAgent) readNodes() error {
-	msg, err := srv.readUntil(metaWait)
+	msg, err := srv.readUntil(nodesReadWait)
 	if err != nil {
 		return err
 	}
