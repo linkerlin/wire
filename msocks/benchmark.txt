@@ -116,3 +116,22 @@ Benchmark8KMessages-4         	100000000	        16.3 ns/op	504765.96 MB/s	     
 Benchmark16KMessages-4        	100000000	        16.4 ns/op	1000206.44 MB/s	       0 B/op	       0 allocs/op
 PASS
 ok  	github.com/wirekit/wire/msocks	29.315s
+
+goos: darwin
+goarch: amd64
+pkg: github.com/wirekit/wire/mtcp
+BenchmarkNoBytesMessages-4    	100000000	        17.3 ns/op	 347.05 MB/s	       0 B/op	       0 allocs/op
+Benchmark2BytesMessages-4     	100000000	        17.3 ns/op	 463.20 MB/s	       0 B/op	       0 allocs/op
+Benchmark4BytesMessages-4     	100000000	        16.4 ns/op	 610.46 MB/s	       0 B/op	       0 allocs/op
+Benchmark8BytesMessages-4     	100000000	        16.4 ns/op	 853.25 MB/s	       0 B/op	       0 allocs/op
+Benchmark16BytesMessages-4    	100000000	        17.0 ns/op	1297.60 MB/s	       0 B/op	       0 allocs/op
+Benchmark32BytesMessages-4    	100000000	        16.5 ns/op	2304.70 MB/s	       0 B/op	       0 allocs/op
+Benchmark64BytesMessages-4    	100000000	        16.2 ns/op	4307.74 MB/s	       0 B/op	       0 allocs/op
+Benchmark128BytesMessages-4   	100000000	        15.8 ns/op	8476.14 MB/s	       0 B/op	       0 allocs/op
+Benchmark256BytesMessages-4   	100000000	        16.0 ns/op	16374.80 MB/s	       0 B/op	       0 allocs/op
+Benchmark1KMessages-4         	100000000	        16.0 ns/op	64482.41 MB/s	       0 B/op	       0 allocs/op
+Benchmark4KMessages-4         	100000000	        16.4 ns/op	249576.48 MB/s	       0 B/op	       0 allocs/op
+Benchmark8KMessages-4         	100000000	        16.0 ns/op	512621.70 MB/s	       0 B/op	       0 allocs/op
+Benchmark16KMessages-4        	100000000	        15.9 ns/op	1029290.18 MB/s	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/wirekit/wire/mtcp	26.486s
