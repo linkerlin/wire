@@ -1,4 +1,4 @@
-package mnet
+package wire
 
 import (
 	"context"
@@ -195,7 +195,7 @@ type ReconnectionFunc func(string) error
 type StatisticsFunc func() (ClientStatistic, error)
 
 //*************************************************************************
-// mnet.Client Method and Implementation
+// wire.Client Method and Implementation
 //*************************************************************************
 
 // Client holds a given information regarding a given network connection.

@@ -1,4 +1,4 @@
-package mnet
+package wire
 
 import "time"
 

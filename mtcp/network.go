@@ -26,12 +26,12 @@ import (
 )
 
 var (
-	cinfoBytes                    = []byte(mnet.CINFO)
-	rinfoBytes                    = []byte(mnet.RINFO)
-	clStatusBytes                 = []byte(mnet.CLSTATUS)
-	rescueBytes                   = []byte(mnet.CRESCUE)
-	handshakeCompletedBytes       = []byte(mnet.CLHANDSHAKECOMPLETED)
-	clientHandshakeCompletedBytes = []byte(mnet.ClientHandShakeCompleted)
+	cinfoBytes                    = []byte(wire.CINFO)
+	rinfoBytes                    = []byte(wire.RINFO)
+	clStatusBytes                 = []byte(wire.CLSTATUS)
+	rescueBytes                   = []byte(wire.CRESCUE)
+	handshakeCompletedBytes       = []byte(wire.CLHANDSHAKECOMPLETED)
+	clientHandshakeCompletedBytes = []byte(wire.ClientHandShakeCompleted)
 )
 
 //************************************************************************
@@ -45,7 +45,7 @@ type tcpServerClient struct {
 	serverAddr net.Addr
 	localAddr  net.Addr
 	remoteAddr net.Addr
-	srcInfo    *mnet.Info
+	srcInfo    *wire.Info
 	logs       history.Ctx
 	network    *TCPNetwork
 	worker     sync.WaitGroup
@@ -80,13 +80,13 @@ func (nc *tcpServerClient) isCluster() bool {
 // isLive returns an error if networkconn is disconnected from network.
 func (nc *tcpServerClient) isLive() error {
 	if atomic.LoadInt64(&nc.closed) == 1 {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 	return nil
 }
 
-func (nc *tcpServerClient) getStatistics() (mnet.ClientStatistic, error) {
-	var stats mnet.ClientStatistic
+func (nc *tcpServerClient) getStatistics() (wire.ClientStatistic, error) {
+	var stats wire.ClientStatistic
 	stats.ID = nc.id
 	stats.Local = nc.localAddr
 	stats.Remote = nc.remoteAddr
@@ -121,7 +121,7 @@ func (nc *tcpServerClient) buffered() (float64, error) {
 	defer nc.bu.Unlock()
 
 	if nc.buffWriter == nil {
-		return 0, mnet.ErrAlreadyClosed
+		return 0, wire.ErrAlreadyClosed
 	}
 
 	available := float64(nc.buffWriter.Available())
@@ -140,19 +140,19 @@ func (nc *tcpServerClient) flush() error {
 	nc.mu.RUnlock()
 
 	if conn == nil {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 
 	nc.bu.Lock()
 	defer nc.bu.Unlock()
 	if nc.buffWriter == nil {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 
 	buffered := nc.buffWriter.Buffered()
 	atomic.AddInt64(&nc.totalFlushOut, int64(buffered))
 
-	conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
+	conn.SetWriteDeadline(time.Now().Add(wire.MaxFlushDeadline))
 	err := nc.buffWriter.Flush()
 	conn.SetWriteDeadline(time.Time{})
 
@@ -177,38 +177,38 @@ func (nc *tcpServerClient) read() ([]byte, error) {
 	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
 
 	if bytes.HasPrefix(indata, clientHandshakeCompletedBytes) {
-		return nil, mnet.ErrNoDataYet
+		return nil, wire.ErrNoDataYet
 	}
 
 	if bytes.HasPrefix(indata, cinfoBytes) {
 		if err := nc.handleCINFO(); err != nil {
 			return nil, err
 		}
-		return nil, mnet.ErrNoDataYet
+		return nil, wire.ErrNoDataYet
 	}
 
 	if bytes.HasPrefix(indata, clStatusBytes) {
 		if err := nc.handleCLStatusReceive(indata); err != nil {
 			return nil, err
 		}
-		return nil, mnet.ErrNoDataYet
+		return nil, wire.ErrNoDataYet
 	}
 
 	return indata, nil
 }
 
-func (nc *tcpServerClient) getInfo() mnet.Info {
-	var base mnet.Info
+func (nc *tcpServerClient) getInfo() wire.Info {
+	var base wire.Info
 	if nc.isCluster() && nc.srcInfo != nil {
 		base = *nc.srcInfo
 	} else {
-		base = mnet.Info{
+		base = wire.Info{
 			ID:         nc.id,
 			ServerNode: true,
 			Cluster:    nc.isACluster,
 			Meta:       nc.network.Meta,
 			MaxBuffer:  int64(nc.maxWrite),
-			MinBuffer:  mnet.MinBufferSize,
+			MinBuffer:  wire.MinBufferSize,
 			ServerAddr: nc.serverAddr.String(),
 		}
 	}
@@ -228,7 +228,7 @@ func (nc *tcpServerClient) getInfo() mnet.Info {
 func (nc *tcpServerClient) handleCLStatusReceive(data []byte) error {
 	data = bytes.TrimPrefix(data, clStatusBytes)
 
-	var info mnet.Info
+	var info wire.Info
 	if err := json.Unmarshal(data, &info); err != nil {
 		return err
 	}
@@ -247,13 +247,13 @@ func (nc *tcpServerClient) handleCLStatusReceive(data []byte) error {
 }
 
 func (nc *tcpServerClient) handleCLStatusSend() error {
-	var info mnet.Info
+	var info wire.Info
 	info.Cluster = true
 	info.ServerNode = true
 	info.ID = nc.network.ID
 	info.Meta = nc.network.Meta
 	info.MaxBuffer = int64(nc.maxWrite)
-	info.MinBuffer = mnet.MinBufferSize
+	info.MinBuffer = wire.MinBufferSize
 	info.ServerAddr = nc.network.raddr.String()
 
 	if others, err := nc.network.getOtherClients(nc.id); err != nil {
@@ -301,7 +301,7 @@ func (nc *tcpServerClient) handleCINFO() error {
 func (nc *tcpServerClient) handleRINFO(data []byte) error {
 	data = bytes.TrimPrefix(data, rinfoBytes)
 
-	var info mnet.Info
+	var info wire.Info
 	if err := json.Unmarshal(data, &info); err != nil {
 		return err
 	}
@@ -356,11 +356,9 @@ func (nc *tcpServerClient) sendCINFOReq() error {
 }
 
 func (nc *tcpServerClient) handshake() error {
-	logs := nc.logs.WithTitle("tcpServerClient.handshake")
-
 	if err := nc.sendCINFOReq(); err != nil {
-		logs.Error(err, "error sending CINFO request")
-		logs.Red("Failed to send CINFO request")
+		nc.logs.Error(err, "error sending CINFO request")
+		nc.logs.Red("Failed to send CINFO request")
 		return err
 	}
 
@@ -370,25 +368,25 @@ func (nc *tcpServerClient) handshake() error {
 	for {
 		msg, err := nc.read()
 		if err != nil {
-			if err != mnet.ErrNoDataYet {
+			if err != wire.ErrNoDataYet {
 				return err
 			}
 
-			if time.Now().Sub(before) > mnet.MaxInfoWait {
+			if time.Now().Sub(before) > wire.MaxInfoWait {
 				nc.closeConn()
-				logs.Error(mnet.ErrFailedToRecieveInfo, "read timeout")
-				logs.Red("read timeout")
-				return mnet.ErrFailedToRecieveInfo
+				nc.logs.Error(wire.ErrFailedToRecieveInfo, "read timeout")
+				nc.logs.Red("read timeout")
+				return wire.ErrFailedToRecieveInfo
 			}
 			continue
 		}
 
 		// if we get a rescue signal, then client never got our CINFO request, so resent.
 		if bytes.Equal(msg, rescueBytes) {
-			logs.Info("received rescue request")
+			nc.logs.Info("received rescue request")
 			if err := nc.sendCINFOReq(); err != nil {
-				logs.Error(err, "failed to send CINFO after rescue request")
-				logs.Red("send error with CINFO after rescue")
+				nc.logs.Error(err, "failed to send CINFO after rescue request")
+				nc.logs.Red("send error with CINFO after rescue")
 				return err
 			}
 
@@ -397,17 +395,17 @@ func (nc *tcpServerClient) handshake() error {
 			continue
 		}
 
-		// First message should be a mnet.RCINFO response.
+		// First message should be a wire.RCINFO response.
 		if !bytes.HasPrefix(msg, rinfoBytes) {
 			nc.closeConn()
-			logs.Error(mnet.ErrFailedToRecieveInfo, "failed to receive RCINFO response")
-			logs.Red("failed handshake at RCINFO response")
-			return mnet.ErrFailedToRecieveInfo
+			nc.logs.Error(wire.ErrFailedToRecieveInfo, "failed to receive RCINFO response")
+			nc.logs.Red("failed handshake at RCINFO response")
+			return wire.ErrFailedToRecieveInfo
 		}
 
 		if err := nc.handleRINFO(msg); err != nil {
-			logs.Error(err, "failed to process RCINFO response")
-			logs.Red("failed handshake at RCINFO response process")
+			nc.logs.Error(err, "failed to process RCINFO response")
+			nc.logs.Red("failed handshake at RCINFO response process")
 			return err
 		}
 
@@ -416,10 +414,10 @@ func (nc *tcpServerClient) handshake() error {
 
 	// if its a cluster send Cluster Status message.
 	if nc.isACluster {
-		logs.Info("client cluster handshake agreement processing")
+		nc.logs.Info("client cluster handshake agreement processing")
 		if err := nc.handleCLStatusSend(); err != nil {
-			logs.Error(err, "failed to send CLStatus message")
-			logs.Red("failed handshake at CLStatus message")
+			nc.logs.Error(err, "failed to send CLStatus message")
+			nc.logs.Red("failed handshake at CLStatus message")
 			return err
 		}
 
@@ -429,15 +427,15 @@ func (nc *tcpServerClient) handshake() error {
 		for {
 			msg, err := nc.read()
 			if err != nil {
-				if err != mnet.ErrNoDataYet {
+				if err != wire.ErrNoDataYet {
 					return err
 				}
 
-				if time.Now().Sub(before) > mnet.MaxInfoWait {
+				if time.Now().Sub(before) > wire.MaxInfoWait {
 					nc.closeConn()
-					logs.Error(mnet.ErrFailedToCompleteHandshake, "response timeout")
-					logs.Red("failed to complete handshake")
-					return mnet.ErrFailedToCompleteHandshake
+					nc.logs.Error(wire.ErrFailedToCompleteHandshake, "response timeout")
+					nc.logs.Red("failed to complete handshake")
+					return wire.ErrFailedToCompleteHandshake
 				}
 				continue
 			}
@@ -445,8 +443,8 @@ func (nc *tcpServerClient) handshake() error {
 			// if we get a rescue signal, then client never got our CLStatus response, so resend.
 			if bytes.Equal(msg, rescueBytes) {
 				if err := nc.handleCLStatusSend(); err != nil {
-					logs.Error(err, "failed to send CLStatus response message")
-					logs.Red("failed to complete handshake at CLStatus")
+					nc.logs.Error(err, "failed to send CLStatus response message")
+					nc.logs.Red("failed to complete handshake at CLStatus")
 					return err
 				}
 
@@ -456,31 +454,28 @@ func (nc *tcpServerClient) handshake() error {
 			}
 
 			if !bytes.Equal(msg, handshakeCompletedBytes) {
-				logs.Error(mnet.ErrFailedToCompleteHandshake, "failed to received handshake completion")
-				logs.Red("failed to complete handshake at completion signal")
-				return mnet.ErrFailedToCompleteHandshake
+				nc.logs.Error(wire.ErrFailedToCompleteHandshake, "failed to received handshake completion")
+				nc.logs.Red("failed to complete handshake at completion signal")
+				return wire.ErrFailedToCompleteHandshake
 			}
 
 			break
 		}
 	} else {
 		if err := nc.sendCLHSCompleted(); err != nil {
-			logs.Error(err, "failed to deliver CLHS handshake completion signal")
-			logs.Red("failed non-cluster handshake completion")
+			nc.logs.Error(err, "failed to deliver CLHS handshake completion signal")
+			nc.logs.Red("failed non-cluster handshake completion")
 			return err
 		}
 	}
 
-	logs.Info("handshake completed")
+	nc.logs.Info("handshake completed")
 
 	return nil
 }
 
 func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
-	logs := nc.logs.WithTitle("tcpServerClient.write")
-
 	if err := nc.isLive(); err != nil {
-		logs.Error(err, "client connection is closed")
 		return nil, err
 	}
 
@@ -490,13 +485,10 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 	nc.mu.RUnlock()
 
 	if conn == nil {
-		logs.Error(mnet.ErrAlreadyClosed, "client connection has no net.Conn")
-		return nil, mnet.ErrAlreadyClosed
+		return nil, wire.ErrAlreadyClosed
 	}
 
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
-		logctx := logs.With("sending-size", len(data)).With("sending-data", string(data))
-
 		atomic.AddInt64(&nc.totalWritten, 1)
 		atomic.AddInt64(&nc.totalWritten, int64(len(data)))
 
@@ -504,9 +496,7 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 		defer nc.bu.Unlock()
 
 		if nc.buffWriter == nil {
-			logctx.Error(mnet.ErrAlreadyClosed, "writer connection has been closed")
-			logctx.Yellow("data unable to be written")
-			return mnet.ErrAlreadyClosed
+			return wire.ErrAlreadyClosed
 		}
 
 		//available := nc.buffWriter.Available()
@@ -517,40 +507,32 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 		toWrite := buffered + len(data)
 
 		// add size header
-		toWrite += mnet.HeaderLength
+		toWrite += wire.HeaderLength
 
 		if toWrite >= nc.maxWrite {
-			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
+			conn.SetWriteDeadline(time.Now().Add(wire.MaxFlushDeadline))
 			if err := nc.buffWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
-				logs.Error(err, "failed to flush data")
-				logctx.Yellow("data unable to be written")
 				return err
 			}
 			conn.SetWriteDeadline(time.Time{})
 		}
 
 		if _, err := nc.buffWriter.Write(size); err != nil {
-			logs.Error(err, "failed to writer data size bytes")
-			logctx.Yellow("data unable to be written")
 			return err
 		}
 
 		if _, err := nc.buffWriter.Write(data); err != nil {
-			logs.Error(err, "failed to writer data bytes")
-			logctx.Yellow("data unable to be written")
 			return err
 		}
 
 		return nil
-	}, mnet.HeaderLength, inSize), nil
+	}, wire.HeaderLength, inSize), nil
 }
 
 func (nc *tcpServerClient) closeConnection() error {
-	logs := nc.logs.WithTitle("tcpServerClient.closeConnection")
-
 	if err := nc.isLive(); err != nil {
-		logs.Error(err, "client already closed")
+		nc.logs.Error(err, "client already closed")
 		return err
 	}
 
@@ -560,8 +542,8 @@ func (nc *tcpServerClient) closeConnection() error {
 
 	nc.mu.Lock()
 	if nc.conn == nil {
-		logs.Yellow("client already closed")
-		return mnet.ErrAlreadyClosed
+		nc.logs.Yellow("client already closed")
+		return wire.ErrAlreadyClosed
 	}
 	err := nc.conn.Close()
 	nc.mu.Unlock()
@@ -576,7 +558,7 @@ func (nc *tcpServerClient) closeConnection() error {
 	nc.buffWriter = nil
 	nc.bu.Unlock()
 
-	logs.Info("client closed")
+	nc.logs.Info("client closed")
 	return err
 }
 
@@ -608,29 +590,27 @@ func (nc *tcpServerClient) readLoop() {
 	nc.mu.RUnlock()
 
 	connReader := bufio.NewReaderSize(cn, nc.maxWrite)
-	lreader := internal.NewLengthRecvReader(connReader, mnet.HeaderLength)
-
-	logs := nc.logs.WithTitle("tcpServerClient.readLoop")
+	lreader := internal.NewLengthRecvReader(connReader, wire.HeaderLength)
 
 	var incoming []byte
 
 	for {
 		frame, err := lreader.ReadHeader()
 		if err != nil {
-			logs.Error(err, "read header error")
+			nc.logs.Error(err, "read header error")
 			return
 		}
 
 		incoming = make([]byte, frame)
 		n, err := lreader.Read(incoming)
 		if err != nil {
-			logs.Error(err, "read error")
+			nc.logs.Error(err, "read error")
 			return
 		}
 
-		atomic.AddInt64(&nc.totalRead, int64(len(incoming[:n])))
+		atomic.AddInt64(&nc.totalRead, int64(len(incoming)))
 
-		datalog := logs.With("data", string(incoming[:n])).Info("received data")
+		datalog := nc.logs.With("data", string(incoming)).Info("received data")
 
 		// Send into go-routine (critical path)?
 		if err := nc.parser.Parse(incoming[:n]); err != nil {
@@ -644,13 +624,13 @@ func (nc *tcpServerClient) readLoop() {
 //  TCP Server Implementation
 //************************************************************************
 
-// TCPNetwork defines a network which runs ontop of provided mnet.ConnHandler.
+// TCPNetwork defines a network which runs ontop of provided wire.ConnHandler.
 type TCPNetwork struct {
 	ID         string
 	Addr       string
 	ServerName string
 	TLS        *tls.Config
-	Handler    mnet.ConnHandler
+	Handler    wire.ConnHandler
 
 	totalClients int64
 	totalClosed  int64
@@ -659,7 +639,7 @@ type TCPNetwork struct {
 
 	// Hook provides a means to get hook into the lifecycle-processes of
 	// the network and client connection and disconnection.
-	Hook mnet.Hook
+	Hook wire.Hook
 
 	// Dialer to be used to create net.Conn to connect to cluster address
 	// in TCPNetwork.AddCluster. Set to use a custom dialer.
@@ -668,7 +648,7 @@ type TCPNetwork struct {
 	// Meta contains user defined gacts for this server which will be send along
 	// the transfer. Always ensure not to keep large objects or info in here. It
 	// is expected to be small.
-	Meta mnet.Meta
+	Meta wire.Meta
 
 	// MaxConnection defines the total allowed connections for
 	// giving network.
@@ -725,7 +705,7 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	}
 
 	if n.Dialer == nil {
-		n.Dialer = &net.Dialer{Timeout: mnet.DefaultDialTimeout}
+		n.Dialer = &net.Dialer{Timeout: wire.DefaultDialTimeout}
 	}
 
 	if n.TLS != nil && !n.TLS.InsecureSkipVerify {
@@ -748,19 +728,19 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	})
 
 	if n.MaxWriteSize <= 0 {
-		n.MaxWriteSize = mnet.MaxBufferSize
+		n.MaxWriteSize = wire.MaxBufferSize
 	}
 
 	if n.MaxConnections <= 0 {
-		n.MaxConnections = mnet.MaxConnections
+		n.MaxConnections = wire.MaxConnections
 	}
 
 	if n.MaxClusterRetries <= 0 {
-		n.MaxClusterRetries = mnet.MaxReconnectRetries
+		n.MaxClusterRetries = wire.MaxReconnectRetries
 	}
 
 	if n.ClusterRetryDelay <= 0 {
-		n.ClusterRetryDelay = mnet.DefaultClusterRetryDelay
+		n.ClusterRetryDelay = wire.DefaultClusterRetryDelay
 	}
 
 	n.routines.Add(2)
@@ -774,19 +754,16 @@ func (n *TCPNetwork) Start(ctx context.Context) error {
 	return nil
 }
 
-func (n *TCPNetwork) registerCluster(clusters []mnet.Info) {
-	logctx := n.logs.WithTitle("WebsocketNetwork.registerClusters")
+func (n *TCPNetwork) registerCluster(clusters []wire.Info) {
 	for _, cluster := range clusters {
 		if err := n.AddCluster(cluster.ServerAddr); err != nil {
-			logctx.With("info", cluster).Error(err, "failed to add cluster address")
+			n.logs.With("info", cluster).Error(err, "failed to add cluster address")
 		}
 	}
 }
 
 func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
-
-	logs := n.logs.WithTitle("TCPNetwork.handleClose")
 
 	<-ctx.Done()
 
@@ -799,20 +776,20 @@ func (n *TCPNetwork) handleClose(ctx context.Context, stream melon.ConnReadWrite
 	n.cu.RUnlock()
 
 	if err := stream.Close(); err != nil {
-		logs.Error(err, "closing listener")
-		logs.Red("network listener closed")
+		n.logs.Error(err, "closing listener")
+		n.logs.Red("network listener closed")
 	}
 
 	if n.Hook != nil {
 		n.Hook.NetworkClosed()
 	}
 
-	logs.Info("network closed")
+	n.logs.Info("network closed")
 }
 
 // Statistics returns statics associated with TCPNetwork.
-func (n *TCPNetwork) Statistics() mnet.NetworkStatistic {
-	var stats mnet.NetworkStatistic
+func (n *TCPNetwork) Statistics() wire.NetworkStatistic {
+	var stats wire.NetworkStatistic
 	stats.ID = n.ID
 	stats.LocalAddr = n.raddr
 	stats.RemoteAddr = n.raddr
@@ -827,17 +804,17 @@ func (n *TCPNetwork) Wait() {
 	n.routines.Wait()
 }
 
-func (n *TCPNetwork) getOtherClients(cid string) ([]mnet.Client, error) {
+func (n *TCPNetwork) getOtherClients(cid string) ([]wire.Client, error) {
 	n.cu.Lock()
 	defer n.cu.Unlock()
 
-	var clients []mnet.Client
+	var clients []wire.Client
 	for id, conn := range n.clients {
 		if id == cid {
 			continue
 		}
 
-		var client mnet.Client
+		var client wire.Client
 		client.NID = n.ID
 		client.ID = conn.id
 		client.FlushFunc = conn.flush
@@ -850,7 +827,7 @@ func (n *TCPNetwork) getOtherClients(cid string) ([]mnet.Client, error) {
 		client.StatisticFunc = conn.getStatistics
 		client.RemoteAddrFunc = conn.getRemoteAddr
 		client.LocalAddrFunc = conn.getLocalAddr
-		client.SiblingsFunc = func() ([]mnet.Client, error) {
+		client.SiblingsFunc = func() ([]wire.Client, error) {
 			return n.getOtherClients(cid)
 		}
 
@@ -869,7 +846,7 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 	}
 
 	if n.connectedToMeByAddr(addr) {
-		return mnet.ErrAlreadyServiced
+		return wire.ErrAlreadyServiced
 	}
 
 	var err error
@@ -887,12 +864,12 @@ func (n *TCPNetwork) AddCluster(addr string) error {
 
 	if n.connectedToMeByAddr(conn.RemoteAddr().String()) {
 		conn.Close()
-		return mnet.ErrAlreadyServiced
+		return wire.ErrAlreadyServiced
 	}
 
-	policy := mnet.FunctionPolicy(n.MaxClusterRetries, func() error {
+	policy := wire.FunctionPolicy(n.MaxClusterRetries, func() error {
 		return n.AddCluster(addr)
-	}, mnet.ExponentialDelay(n.ClusterRetryDelay))
+	}, wire.ExponentialDelay(n.ClusterRetryDelay))
 
 	if err := n.addClient(conn, policy, true); err != nil {
 		conn.Close()
@@ -939,13 +916,13 @@ func (n *TCPNetwork) connectedToMe(conn net.Conn) bool {
 	return false
 }
 
-func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster bool) error {
+func (n *TCPNetwork) addClient(conn net.Conn, policy wire.RetryPolicy, isCluster bool) error {
 	defer atomic.AddInt64(&n.totalOpened, -1)
 	defer atomic.AddInt64(&n.totalClosed, 1)
 
 	id := uuid.NewV4().String()
 
-	client := mnet.Client{
+	client := wire.Client{
 		ID:  id,
 		NID: n.ID,
 	}
@@ -984,7 +961,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy mnet.RetryPolicy, isCluster
 	client.LocalAddrFunc = nc.getLocalAddr
 	client.StatisticFunc = nc.getStatistics
 	client.RemoteAddrFunc = nc.getRemoteAddr
-	client.SiblingsFunc = func() ([]mnet.Client, error) {
+	client.SiblingsFunc = func() ([]wire.Client, error) {
 		return n.getOtherClients(nc.id)
 	}
 
@@ -1054,7 +1031,7 @@ func (n *TCPNetwork) Addrs() net.Addr {
 func (n *TCPNetwork) runStream(stream melon.ConnReadWriteCloser) {
 	defer n.routines.Done()
 
-	initial := mnet.MinTemporarySleep
+	initial := wire.MinTemporarySleep
 
 	for {
 		newConn, err := stream.ReadConn()
@@ -1072,8 +1049,8 @@ func (n *TCPNetwork) runStream(stream melon.ConnReadWriteCloser) {
 				time.Sleep(initial)
 				initial *= 2
 
-				if initial >= mnet.MaxTemporarySleep {
-					initial = mnet.MinTemporarySleep
+				if initial >= wire.MaxTemporarySleep {
+					initial = wire.MinTemporarySleep
 				}
 			}
 

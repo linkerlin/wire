@@ -69,7 +69,7 @@ func (smp *TaggedMessages) Next() ([]byte, error) {
 	smp.mu.RLock()
 	if smp.tail == nil && smp.head == nil {
 		smp.mu.RUnlock()
-		return nil, mnet.ErrNoDataYet
+		return nil, wire.ErrNoDataYet
 	}
 
 	defer smp.mu.RUnlock()

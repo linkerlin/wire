@@ -99,3 +99,37 @@ func GetMethod(depth int) (string, string, int) {
 	// return its name
 	return fun.Name(), fileName, line
 }
+
+// GetMethodGraph returns the caller of the function that called it :)
+func GetMethodGraph(depth int) CallGraph {
+	var graph CallGraph
+	graph.In.File = "???"
+	graph.By.File = "???"
+	graph.In.Function = "Unknown()"
+	graph.By.Function = "Unknown()"
+
+	// we get the callers as uintptrs - but we just need 1
+	lower := make([]uintptr, 2)
+
+	// skip 3 levels to get to the caller of whoever called Caller()
+	if n := runtime.Callers(depth, lower); n == 0 {
+		return graph
+	}
+
+	lowerPtr := lower[0] - 1
+	higherPtr := lower[1] - 1
+
+	// get the info of the actual function that's in the pointer
+	if lowerFun := runtime.FuncForPC(lowerPtr); lowerFun != nil {
+		graph.By.File, graph.By.Line = lowerFun.FileLine(lowerPtr)
+		graph.By.Function = lowerFun.Name()
+
+	}
+
+	if higherFun := runtime.FuncForPC(higherPtr); higherFun != nil {
+		graph.In.File, graph.In.Line = higherFun.FileLine(higherPtr)
+		graph.In.Function = higherFun.Name()
+	}
+
+	return graph
+}

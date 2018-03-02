@@ -93,8 +93,8 @@ func NetworkID(id string) ConnectOptions {
 // by the Client to communicate with the server. It understands
 // the message length header sent along by every message and follows
 // suite when sending to server.
-func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
-	var c mnet.Client
+func Connect(addr string, ops ...ConnectOptions) (wire.Client, error) {
+	var c wire.Client
 	c.ID = uuid.NewV4().String()
 
 	addr = netutils.GetAddr(addr)
@@ -120,7 +120,7 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	}
 
 	if network.maxWrite <= 0 {
-		network.maxWrite = mnet.MaxBufferSize
+		network.maxWrite = wire.MaxBufferSize
 	}
 
 	if network.dialer == nil {
@@ -172,16 +172,16 @@ func (cn *socketClient) isStarted() bool {
 	return atomic.LoadInt64(&cn.started) == 1
 }
 
-func (cn *socketClient) getInfo() mnet.Info {
+func (cn *socketClient) getInfo() wire.Info {
 	addr := cn.addr
 	if cn.remoteAddr != nil {
 		addr = cn.remoteAddr.String()
 	}
 
-	return mnet.Info{
+	return wire.Info{
 		ID:         cn.id,
 		ServerAddr: addr,
-		MinBuffer:  mnet.MinBufferSize,
+		MinBuffer:  wire.MinBufferSize,
 		MaxBuffer:  int64(cn.maxWrite),
 	}
 }
@@ -221,8 +221,8 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 	bctx.With("client", cn.id).With("network", cn.nid)
 	bctx.With("local-addr", cn.localAddr).With("remote-addr", cn.remoteAddr).With("server-addr", cn.serverAddr)
 
-	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
-	msg := make([]byte, mnet.SmallestMinBufferSize)
+	lreader := internal.NewLengthRecvReader(reader, wire.HeaderLength)
+	msg := make([]byte, wire.SmallestMinBufferSize)
 
 	var attempts int
 	var sendRescueMsg bool
@@ -236,11 +236,11 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 			}
 
 			sendRescueMsg = false
-			time.Sleep(mnet.InfoTemporarySleep)
+			time.Sleep(wire.InfoTemporarySleep)
 			continue
 		}
 
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		conn.SetReadDeadline(time.Now().Add(wire.MaxReadDeadline))
 		size, err := lreader.ReadHeader()
 		if err != nil {
 			conn.SetReadDeadline(time.Time{})
@@ -248,10 +248,10 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 
 			// if its a timeout error then retry if we are not maxed attempts.
 			if netErr, ok := err.(net.Error); ok {
-				if netErr.Timeout() && attempts < mnet.MaxHandshakeAttempts {
+				if netErr.Timeout() && attempts < wire.MaxHandshakeAttempts {
 					attempts++
 					sendRescueMsg = true
-					time.Sleep(mnet.InfoTemporarySleep)
+					time.Sleep(wire.InfoTemporarySleep)
 					continue
 				}
 			}
@@ -264,14 +264,14 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 
 		_, err = lreader.Read(msg)
 		if err != nil {
-			bctx.Red("failed to receive mnet.RCINFO req header")
+			bctx.Red("failed to receive wire.RCINFO req header")
 			return err
 		}
 
 		if !bytes.Equal(msg, cinfoBytes) {
-			bctx.Error(mnet.ErrFailedToRecieveInfo, "no reception of info")
-			bctx.Red("invalid mnet.RCINFO prefix")
-			return mnet.ErrFailedToRecieveInfo
+			bctx.Error(wire.ErrFailedToRecieveInfo, "no reception of info")
+			bctx.Red("invalid wire.RCINFO prefix")
+			return wire.ErrFailedToRecieveInfo
 		}
 
 		break
@@ -286,7 +286,7 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 	bctx.Info("Awaiting Handshake complete signal")
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		conn.SetReadDeadline(time.Now().Add(wire.MaxReadDeadline))
 		size, err := lreader.ReadHeader()
 		if err != nil {
 			conn.SetReadDeadline(time.Time{})
@@ -306,7 +306,7 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 
 		if !bytes.Equal(msg, clientHandshakeCompletedBytes) {
 			bctx.Red("handshake not completed")
-			return mnet.ErrFailedToCompleteHandshake
+			return wire.ErrFailedToCompleteHandshake
 		}
 
 		break
@@ -318,7 +318,7 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 
 func (cn *socketClient) close() error {
 	if err := cn.isAlive(); err != nil {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 
 	err := cn.websocketServerClient.close()
@@ -396,7 +396,7 @@ func (cn *socketClient) getConn(addr string) (net.Conn, error) {
 	var conn net.Conn
 	var hs ws.Handshake
 
-	lastSleep := mnet.MinTemporarySleep
+	lastSleep := wire.MinTemporarySleep
 
 	for {
 		conn, _, hs, err = cn.dialer.Dial(context.Background(), addr)
@@ -404,7 +404,7 @@ func (cn *socketClient) getConn(addr string) (net.Conn, error) {
 			bctx.Error(err, "Failed to connect to server")
 
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				if lastSleep >= mnet.MaxTemporarySleep {
+				if lastSleep >= wire.MaxTemporarySleep {
 					bctx.Red("Failed to connect to server with expired retries").With("err", err)
 					return nil, err
 				}

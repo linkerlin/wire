@@ -79,8 +79,8 @@ func NetworkID(id string) ConnectOptions {
 // by the Client to communicate with the server. It understands
 // the message length header sent along by every message and follows
 // suite when sending to server.
-func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
-	var c mnet.Client
+func Connect(addr string, ops ...ConnectOptions) (wire.Client, error) {
+	var c wire.Client
 	c.ID = uuid.NewV4().String()
 
 	addr = netutils.GetAddr(addr)
@@ -99,15 +99,15 @@ func Connect(addr string, ops ...ConnectOptions) (mnet.Client, error) {
 	}
 
 	if network.dialTimeout <= 0 {
-		network.dialTimeout = mnet.DefaultDialTimeout
+		network.dialTimeout = wire.DefaultDialTimeout
 	}
 
 	if network.keepAliveTimeout <= 0 {
-		network.keepAliveTimeout = mnet.DefaultKeepAlive
+		network.keepAliveTimeout = wire.DefaultKeepAlive
 	}
 
 	if network.maxWrite <= 0 {
-		network.maxWrite = mnet.MaxBufferSize
+		network.maxWrite = wire.MaxBufferSize
 	}
 
 	if network.dialer == nil {
@@ -207,8 +207,8 @@ func (cn *clientNetwork) sendRescue() error {
 }
 
 func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
-	lreader := internal.NewLengthRecvReader(reader, mnet.HeaderLength)
-	msg := make([]byte, mnet.SmallestMinBufferSize)
+	lreader := internal.NewLengthRecvReader(reader, wire.HeaderLength)
+	msg := make([]byte, wire.SmallestMinBufferSize)
 
 	var attempts int
 	var sendRescueMsg bool
@@ -221,21 +221,21 @@ func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 			}
 
 			sendRescueMsg = false
-			time.Sleep(mnet.InfoTemporarySleep)
+			time.Sleep(wire.InfoTemporarySleep)
 			continue
 		}
 
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		conn.SetReadDeadline(time.Now().Add(wire.MaxReadDeadline))
 		size, err := lreader.ReadHeader()
 		if err != nil {
 			conn.SetReadDeadline(time.Time{})
 
 			// if its a timeout error then retry if we are not maxed attempts.
 			if netErr, ok := err.(net.Error); ok {
-				if netErr.Timeout() && attempts < mnet.MaxHandshakeAttempts {
+				if netErr.Timeout() && attempts < wire.MaxHandshakeAttempts {
 					attempts++
 					sendRescueMsg = true
-					time.Sleep(mnet.InfoTemporarySleep)
+					time.Sleep(wire.InfoTemporarySleep)
 					continue
 				}
 			}
@@ -252,7 +252,7 @@ func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 		}
 
 		if !bytes.Equal(msg, cinfoBytes) {
-			return mnet.ErrFailedToRecieveInfo
+			return wire.ErrFailedToRecieveInfo
 		}
 
 		break
@@ -263,7 +263,7 @@ func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 	}
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(mnet.MaxReadDeadline))
+		conn.SetReadDeadline(time.Now().Add(wire.MaxReadDeadline))
 		size, err := lreader.ReadHeader()
 		if err != nil {
 			conn.SetReadDeadline(time.Time{})
@@ -281,7 +281,7 @@ func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 		}
 
 		if !bytes.Equal(msg, clientHandshakeCompletedBytes) {
-			return mnet.ErrFailedToCompleteHandshake
+			return wire.ErrFailedToCompleteHandshake
 		}
 
 		break
@@ -290,22 +290,22 @@ func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
 	return nil
 }
 
-func (cn *clientNetwork) getInfo() mnet.Info {
+func (cn *clientNetwork) getInfo() wire.Info {
 	addr := cn.addr
 	if cn.remoteAddr != nil {
 		addr = cn.remoteAddr.String()
 	}
 
-	return mnet.Info{
+	return wire.Info{
 		ID:         cn.id,
 		ServerAddr: addr,
-		MinBuffer:  mnet.MinBufferSize,
+		MinBuffer:  wire.MinBufferSize,
 		MaxBuffer:  int64(cn.maxWrite),
 	}
 }
 
-func (cn *clientNetwork) getStatistics() (mnet.ClientStatistic, error) {
-	var stats mnet.ClientStatistic
+func (cn *clientNetwork) getStatistics() (wire.ClientStatistic, error) {
+	var stats wire.ClientStatistic
 	stats.ID = cn.id
 	stats.Local = cn.localAddr
 	stats.Remote = cn.remoteAddr
@@ -321,7 +321,7 @@ func (cn *clientNetwork) getStatistics() (mnet.ClientStatistic, error) {
 // isLive returns error if clientNetwork is not connected to remote network.
 func (cn *clientNetwork) isLive() error {
 	if atomic.LoadInt64(&cn.closed) == 1 {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 	return nil
 }
@@ -360,7 +360,7 @@ func (cn *clientNetwork) buffered() (float64, error) {
 	cn.bu.Lock()
 	defer cn.bu.Unlock()
 	if cn.buffWriter == nil {
-		return 0, mnet.ErrAlreadyClosed
+		return 0, wire.ErrAlreadyClosed
 	}
 
 	available := float64(cn.buffWriter.Available())
@@ -379,19 +379,19 @@ func (cn *clientNetwork) flush() error {
 	cn.cu.RUnlock()
 
 	if conn == nil {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 
 	cn.bu.Lock()
 	defer cn.bu.Unlock()
 	if cn.buffWriter == nil {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 
 	available := cn.buffWriter.Buffered()
 	atomic.StoreInt64(&cn.totalFlushed, int64(available))
 
-	conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
+	conn.SetWriteDeadline(time.Now().Add(wire.MaxFlushDeadline))
 	err := cn.buffWriter.Flush()
 	if err != nil {
 		conn.SetWriteDeadline(time.Time{})
@@ -403,10 +403,7 @@ func (cn *clientNetwork) flush() error {
 }
 
 func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
-	logs := cn.logs.WithTitle("clientNetwork.write")
-
 	if err := cn.isLive(); err != nil {
-		logs.Error(err, "client connection is closed")
 		return nil, err
 	}
 
@@ -416,12 +413,10 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 	cn.cu.RUnlock()
 
 	if conn == nil {
-		logs.Error(mnet.ErrAlreadyClosed, "client connection has no net.Conn")
-		return nil, mnet.ErrAlreadyClosed
+		return nil, wire.ErrAlreadyClosed
 	}
 
 	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
-		logctx := logs.With("sending-size", len(data)).With("sending-data", string(data))
 		atomic.AddInt64(&cn.MessageWritten, 1)
 		atomic.AddInt64(&cn.totalWritten, int64(len(data)))
 
@@ -429,9 +424,7 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 		defer cn.bu.Unlock()
 
 		if cn.buffWriter == nil {
-			logctx.Error(mnet.ErrAlreadyClosed, "writer connection has been closed")
-			logctx.Yellow("data unable to be written")
-			return mnet.ErrAlreadyClosed
+			return wire.ErrAlreadyClosed
 		}
 
 		//available := cn.buffWriter.Available()
@@ -442,33 +435,27 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 		toWrite := buffered + len(data)
 
 		// add size header
-		toWrite += mnet.HeaderLength
+		toWrite += wire.HeaderLength
 
 		if toWrite >= cn.maxWrite {
-			conn.SetWriteDeadline(time.Now().Add(mnet.MaxFlushDeadline))
+			conn.SetWriteDeadline(time.Now().Add(wire.MaxFlushDeadline))
 			if err := cn.buffWriter.Flush(); err != nil {
 				conn.SetWriteDeadline(time.Time{})
-				logs.Error(err, "failed to flush data")
-				logctx.Yellow("data unable to be written")
 				return err
 			}
 			conn.SetWriteDeadline(time.Time{})
 		}
 
 		if _, err := cn.buffWriter.Write(size); err != nil {
-			logs.Error(err, "failed to writer data size bytes")
-			logctx.Yellow("data unable to be written")
 			return err
 		}
 
 		if _, err := cn.buffWriter.Write(data); err != nil {
-			logs.Error(err, "failed to writer data bytes")
-			logctx.Yellow("data unable to be written")
 			return err
 		}
 
 		return nil
-	}, mnet.HeaderLength, inSize), nil
+	}, wire.HeaderLength, inSize), nil
 }
 
 func (cn *clientNetwork) read() ([]byte, error) {
@@ -487,7 +474,7 @@ func (cn *clientNetwork) read() ([]byte, error) {
 		if err := cn.handleCINFO(); err != nil {
 			return nil, err
 		}
-		return nil, mnet.ErrNoDataYet
+		return nil, wire.ErrNoDataYet
 	}
 
 	return indata, nil
@@ -498,27 +485,25 @@ func (cn *clientNetwork) readLoop(conn net.Conn) {
 	defer cn.worker.Done()
 
 	connReader := bufio.NewReaderSize(conn, cn.maxWrite)
-	lreader := internal.NewLengthRecvReader(connReader, mnet.HeaderLength)
+	lreader := internal.NewLengthRecvReader(connReader, wire.HeaderLength)
 
 	var incoming []byte
-
-	logctx := cn.logs.WithTitle("clientNetwork.readLoop")
 
 	for {
 		frame, err := lreader.ReadHeader()
 		if err != nil {
-			logctx.Error(err, "read header error")
+			cn.logs.Error(err, "read header error")
 			return
 		}
 
 		incoming = make([]byte, frame)
 		n, err := lreader.Read(incoming)
 		if err != nil {
-			logctx.Error(err, "read body error")
+			cn.logs.Error(err, "read body error")
 			return
 		}
 
-		datalog := logctx.With("data", string(incoming)).Info("client received data")
+		datalog := cn.logs.With("data", string(incoming)).Info("client received data")
 
 		atomic.AddInt64(&cn.totalRead, int64(len(incoming[:n])))
 
@@ -539,7 +524,7 @@ func (cn *clientNetwork) close() error {
 
 	cn.cu.Lock()
 	if cn.conn == nil {
-		return mnet.ErrAlreadyClosed
+		return wire.ErrAlreadyClosed
 	}
 	cn.conn.Close()
 	cn.cu.Unlock()
@@ -609,7 +594,7 @@ func (cn *clientNetwork) reconnect(altAddr string) error {
 	cn.logs.With("remote-addr", cn.remoteAddr)
 	cn.logs.With("addr", cn.remoteAddr.String())
 
-	connReader := bufio.NewReaderSize(conn, mnet.MaxBufferSize)
+	connReader := bufio.NewReaderSize(conn, wire.MaxBufferSize)
 	if err := cn.respondToINFO(conn, connReader); err != nil {
 		return err
 	}
@@ -622,7 +607,7 @@ func (cn *clientNetwork) reconnect(altAddr string) error {
 
 // getConn returns net.Conn for giving addr.
 func (cn *clientNetwork) getConn(addr string) (net.Conn, error) {
-	lastSleep := mnet.MinTemporarySleep
+	lastSleep := wire.MinTemporarySleep
 
 	var err error
 	var conn net.Conn
@@ -631,7 +616,7 @@ func (cn *clientNetwork) getConn(addr string) (net.Conn, error) {
 		conn, err = cn.dialer.Dial("tcp", addr)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
-				if lastSleep >= mnet.MaxTemporarySleep {
+				if lastSleep >= wire.MaxTemporarySleep {
 					return nil, err
 				}
 

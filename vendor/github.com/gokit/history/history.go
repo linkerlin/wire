@@ -218,29 +218,21 @@ type Location struct {
 	File     string `json:"file"`
 }
 
+// CallGraph embodies a graph representing the areas where a method
+// call occured.
+type CallGraph struct {
+	In Location
+	By Location
+}
+
 //**************************************************************
 // Field
 //**************************************************************
 
 // Field represents a giving key-value pair with location details.
 type Field struct {
-	By    Location    `json:"by"`
 	Key   string      `json:"key"`
 	Value interface{} `json:"value"`
-}
-
-type sortedFields []Field
-
-func (s sortedFields) Len() int {
-	return len(s)
-}
-
-func (s sortedFields) Less(i, j int) bool {
-	return s[i].Key < s[j].Key
-}
-
-func (s sortedFields) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
 }
 
 //**************************************************************
@@ -250,12 +242,10 @@ func (s sortedFields) Swap(i, j int) {
 // Progress embodies giving messages where giving progress with
 // associated message and level for status.
 type Status struct {
-	When    time.Time   `json:"when"`
 	Message string      `json:"message"`
 	Level   Level       `json:"level"`
 	Err     interface{} `json:"err"`
-	In      Location    `json:"in"`
-	By      Location    `json:"by"`
+	Graph   CallGraph   `json:"graph"`
 }
 
 //**************************************************************
@@ -283,7 +273,6 @@ type Compute interface {
 type BugLog struct {
 	Title     string           `json:"title"`
 	Signature string           `json:"signature"`
-	To        time.Time        `json:"to"`
 	From      time.Time        `json:"from"`
 	Tags      []string         `json:"tags"`
 	Metrics   []Metric         `json:"metrics"`
@@ -324,7 +313,6 @@ func (b *BugLog) addKVS(kv Attrs) Ctx {
 			b.Fields[k] = Field{
 				Key:   k,
 				Value: v,
-				By:    makeLocation(4),
 			}
 		}
 	}
@@ -345,7 +333,6 @@ func (b *BugLog) addKV(k string, v interface{}) Ctx {
 		b.Fields[k] = Field{
 			Key:   k,
 			Value: v,
-			By:    makeLocation(4),
 		}
 	}
 	return b
@@ -384,9 +371,7 @@ func (b *BugLog) Red(msg string, vals ...interface{}) Ctx {
 	return b.logStatus(Status{
 		Message: msg,
 		Level:   RedLvl,
-		When:    time.Now(),
-		In:      makeLocation(5),
-		By:      makeLocation(4),
+		Graph:   GetMethodGraph(3),
 	})
 }
 
@@ -399,9 +384,7 @@ func (b *BugLog) Yellow(msg string, vals ...interface{}) Ctx {
 	return b.logStatus(Status{
 		Message: msg,
 		Level:   YellowLvl,
-		When:    time.Now(),
-		In:      makeLocation(5),
-		By:      makeLocation(4),
+		Graph:   GetMethodGraph(3),
 	})
 }
 
@@ -415,9 +398,7 @@ func (b *BugLog) Error(err error, msg string, vals ...interface{}) Ctx {
 		Err:     err,
 		Message: msg,
 		Level:   ErrorLvl,
-		When:    time.Now(),
-		In:      makeLocation(5),
-		By:      makeLocation(4),
+		Graph:   GetMethodGraph(3),
 	})
 }
 
@@ -430,9 +411,7 @@ func (b *BugLog) Info(msg string, vals ...interface{}) Ctx {
 	return b.logStatus(Status{
 		Message: msg,
 		Level:   InfoLvl,
-		When:    time.Now(),
-		In:      makeLocation(5),
-		By:      makeLocation(4),
+		Graph:   GetMethodGraph(3),
 	})
 }
 
@@ -441,11 +420,10 @@ func (b *BugLog) logStatus(s Status) Ctx {
 	blog.Status = s
 	blog.bugs = nil
 	blog.computes = nil
-	blog.To = time.Now()
 	blog.Metrics = make([]Metric, len(b.computes))
 
 	if blog.Title == "" {
-		blog.Title = s.By.Function
+		blog.Title = s.Graph.By.Function
 	}
 
 	// add the metrics into their respective spots.
@@ -513,4 +491,18 @@ func randName(length int) string {
 		b[i] = alphanums[rand.Intn(len(alphanums))]
 	}
 	return string(b)
+}
+
+type sortedFields []Field
+
+func (s sortedFields) Len() int {
+	return len(s)
+}
+
+func (s sortedFields) Less(i, j int) bool {
+	return s[i].Key < s[j].Key
+}
+
+func (s sortedFields) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
 }

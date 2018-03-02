@@ -76,7 +76,7 @@ func TestNetwork_Add(t *testing.T) {
 	for {
 		msg, err = client.Read()
 		if err != nil {
-			if err == mnet.ErrNoDataYet {
+			if err == wire.ErrNoDataYet {
 				err = nil
 				continue
 			}
@@ -85,7 +85,7 @@ func TestNetwork_Add(t *testing.T) {
 		break
 	}
 
-	var infos []mnet.Info
+	var infos []wire.Info
 	if err := json.Unmarshal(msg, &infos); err != nil {
 		tests.Info("Received: %+q\n", msg)
 		tests.FailedWithError(err, "Should have successfully decoded response")
@@ -216,11 +216,11 @@ func createNewNetwork(ctx context.Context, addr string, config *tls.Config) (*mt
 	netw.Addr = addr
 	netw.TLS = config
 
-	netw.Handler = func(client mnet.Client) error {
+	netw.Handler = func(client wire.Client) error {
 		for {
 			message, err := client.Read()
 			if err != nil {
-				if err == mnet.ErrNoDataYet {
+				if err == wire.ErrNoDataYet {
 					time.Sleep(300 * time.Millisecond)
 					continue
 				}
@@ -275,11 +275,11 @@ func createInfoNetwork(ctx context.Context, addr string, config *tls.Config) (*m
 	netw.Addr = addr
 	netw.TLS = config
 
-	netw.Handler = func(client mnet.Client) error {
+	netw.Handler = func(client wire.Client) error {
 		for {
 			_, err := client.Read()
 			if err != nil {
-				if err == mnet.ErrNoDataYet {
+				if err == wire.ErrNoDataYet {
 					time.Sleep(300 * time.Millisecond)
 					continue
 				}
@@ -287,7 +287,7 @@ func createInfoNetwork(ctx context.Context, addr string, config *tls.Config) (*m
 				return err
 			}
 
-			var infos []mnet.Info
+			var infos []wire.Info
 			infos = append(infos, client.Info())
 			if others, err := client.Others(); err == nil {
 				for _, item := range others {

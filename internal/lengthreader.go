@@ -60,7 +60,7 @@ func NewLengthReader(r io.Reader, headerLen int) *LengthReader {
 		r:      r,
 		header: headerLen,
 		state:  nostate,
-		last:   mnet.MinBufferSize,
+		last:   wire.MinBufferSize,
 		area:   make([]byte, headerLen),
 	}
 }
@@ -200,7 +200,7 @@ func NewLengthRecvReader(r io.Reader, headerLen int) *LengthRecvReader {
 		r:      r,
 		header: headerLen,
 		state:  nostate,
-		last:   mnet.MinBufferSize,
+		last:   wire.MinBufferSize,
 		area:   make([]byte, headerLen),
 	}
 }

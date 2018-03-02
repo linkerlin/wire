@@ -47,7 +47,7 @@ func TestNonTLSNetworkWithClient(t *testing.T) {
 	var readErr error
 	for {
 		res, readErr = client.Read()
-		if readErr != nil && readErr == mnet.ErrNoDataYet {
+		if readErr != nil && readErr == wire.ErrNoDataYet {
 			continue
 		}
 
@@ -130,7 +130,7 @@ func TestTLSNetworkWithClient(t *testing.T) {
 	var readErr error
 	for {
 		res, readErr = client.Read()
-		if readErr != nil && readErr == mnet.ErrNoDataYet {
+		if readErr != nil && readErr == wire.ErrNoDataYet {
 			continue
 		}
 

@@ -37,12 +37,12 @@ ok  	github.com/wirekit/wire/msocks	18.466s
 var netw msocks.Network
 netw.TLS = config
 netw.Addr = "localhost:5050"
-netw.Handler = func(client mnet.Client) error {
+netw.Handler = func(client wire.Client) error {
     // Flush all incoming data out
     for {
         _, err := client.Read()
         if err != nil {
-            if err == mnet.ErrNoDataYet {
+            if err == wire.ErrNoDataYet {
                 time.Sleep(300 * time.Millisecond)
                 continue
             }
@@ -88,7 +88,7 @@ if _, err := client.Flush(); err != nil {
 
 for {
     res, readErr := client.Read()
-    if readErr != nil && readErr == mnet.ErrNoDataYet {
+    if readErr != nil && readErr == wire.ErrNoDataYet {
         continue
     }
 

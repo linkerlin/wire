@@ -141,11 +141,11 @@ func benchThis(b *testing.B, payload []byte) {
 func createBenchmarkNetwork(ctx context.Context, addr string) (*msocks.WebsocketNetwork, error) {
 	var netw msocks.WebsocketNetwork
 	netw.Addr = addr
-	netw.Handler = func(client mnet.Client) error {
+	netw.Handler = func(client wire.Client) error {
 		for {
 			_, err := client.Read()
 			if err != nil {
-				if err == mnet.ErrNoDataYet {
+				if err == wire.ErrNoDataYet {
 					time.Sleep(300 * time.Millisecond)
 					continue
 				}

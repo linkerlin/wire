@@ -39,16 +39,16 @@
 			"revisionTime": "2018-01-14T19:52:27Z"
 		},
 		{
-			"checksumSHA1": "y250STHmise8Jboz3mrsY9RubcA=",
+			"checksumSHA1": "O1CN7eAvNIEXKkxAV0/mFDkPYrM=",
 			"path": "github.com/gokit/history",
-			"revision": "27ca77d48c8fdc9a93f09536862840f9ce1eceef",
-			"revisionTime": "2018-03-02T14:07:39Z"
+			"revision": "1b2a84748e7a18d14756c74d96f653b056d9cb99",
+			"revisionTime": "2018-03-02T17:55:17Z"
 		},
 		{
 			"checksumSHA1": "tP/RnDHsBzR+2NiIgmR0omGkkTg=",
 			"path": "github.com/gokit/history/handlers/discard",
-			"revision": "27ca77d48c8fdc9a93f09536862840f9ce1eceef",
-			"revisionTime": "2018-03-02T14:07:39Z"
+			"revision": "1b2a84748e7a18d14756c74d96f653b056d9cb99",
+			"revisionTime": "2018-03-02T17:55:17Z"
 		},
 		{
 			"checksumSHA1": "oY2QEuLnVlIau98TgwR1KiGQzjc=",
