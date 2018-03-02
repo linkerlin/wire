@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/influx6/faux/tests"
-	"github.com/influx6/mnet/internal"
+	"github.com/wirekit/wire/internal"
 )
 
 func TestActionLengthWriter_Size2(t *testing.T) {

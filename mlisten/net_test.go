@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/influx6/faux/tests"
-	"github.com/influx6/mnet/mlisten"
+	"github.com/wirekit/wire/mlisten"
 )
 
 var rsaCertPEM = `-----BEGIN CERTIFICATE-----

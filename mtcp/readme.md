@@ -10,7 +10,7 @@ Below are recently runned benchmarks, see [BenchmarkTests](./benchmark.txt) for 
 ```bash
 oos: darwin
 goarch: amd64
-pkg: github.com/influx6/mnet/mtcp
+pkg: github.com/wirekit/wire/mtcp
 BenchmarkNoBytesMessages-4    	50000000	        28.6 ns/op	 244.89 MB/s	       0 B/op	       0 allocs/op
 Benchmark2BytesMessages-4     	50000000	        28.6 ns/op	 314.14 MB/s	       0 B/op	       0 allocs/op
 Benchmark4BytesMessages-4     	50000000	        28.0 ns/op	 392.20 MB/s	       0 B/op	       0 allocs/op
@@ -25,7 +25,7 @@ Benchmark4KMessages-4         	50000000	        28.7 ns/op	142932.97 MB/s	      
 Benchmark8KMessages-4         	50000000	        28.5 ns/op	287551.97 MB/s	       0 B/op	       0 allocs/op
 Benchmark16KMessages-4        	50000000	        28.4 ns/op	577755.46 MB/s	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/influx6/mnet/mtcp	19.931s
+ok  	github.com/wirekit/wire/mtcp	19.931s
 ```
 
 ## Examples

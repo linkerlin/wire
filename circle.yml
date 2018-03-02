@@ -7,7 +7,7 @@ jobs:
     docker:
       # specify the version
       - image: circleci/golang:1.9
-    working_directory: /go/src/github.com/influx6/mnet
+    working_directory: /go/src/github.com/wirekit/wire
     steps:
       - checkout
       - run: make coverage

@@ -9,7 +9,7 @@ import (
 	"io"
 
 	"github.com/influx6/faux/tests"
-	"github.com/influx6/mnet/internal"
+	"github.com/wirekit/wire/internal"
 )
 
 func TestLengthRecvReader_MultiRead(t *testing.T) {

@@ -11,8 +11,8 @@ import (
 
 	"context"
 
-	"github.com/influx6/mnet"
-	"github.com/influx6/mnet/mtcp"
+	"github.com/wirekit/wire"
+	"github.com/wirekit/wire/mtcp"
 )
 
 var (

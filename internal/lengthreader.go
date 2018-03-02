@@ -8,7 +8,7 @@ import (
 
 	"encoding/binary"
 
-	"github.com/influx6/mnet"
+	"github.com/wirekit/wire"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/influx6/mnet"
+	"github.com/wirekit/wire"
 )
 
 const (

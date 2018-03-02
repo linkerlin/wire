@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/influx6/faux/tests"
-	"github.com/influx6/mnet/certificates"
-	"github.com/influx6/mnet/mocks"
+	"github.com/wirekit/wire/certificates"
+	"github.com/wirekit/wire/mocks"
 )
 
 func TestCertificateRequestService(t *testing.T) {

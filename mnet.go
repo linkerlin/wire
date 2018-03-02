@@ -330,7 +330,7 @@ func (c Client) Reconnect(altAddr string) error {
 // NOTE: You can also wrap a client instance with the internal package's
 // StreamReader, which caters to organize received streams.
 //
-// Internal Package: (see github.com/influx6/mnet/blob/master/internal)
+// Internal Package: (see github.com/wirekit/wire/blob/master/internal)
 func (c Client) Read() ([]byte, error) {
 	if c.ReaderFunc != nil {
 		return c.ReaderFunc()

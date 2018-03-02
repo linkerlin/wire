@@ -1,8 +1,8 @@
-MNet
+Wire
 ------
-[![Go Report Card](https://goreportcard.com/badge/github.com/influx6/mnet)](https://goreportcard.com/report/github.com/influx6/mnet)
-[![Travis CI](https://travis-ci.org/influx6/mnet.svg?master=branch)](https://travis-ci.org/influx6/mnet)
-[![Circle CI](https://circleci.com/gh/influx6/mnet.svg?style=svg)](https://circleci.com/gh/influx6/mnet)
+[![Go Report Card](https://goreportcard.com/badge/github.com/wirekit/wire)](https://goreportcard.com/report/github.com/wirekit/wire)
+[![Travis CI](https://travis-ci.org/influx6/wire.svg?master=branch)](https://travis-ci.org/influx6/wire)
+[![Circle CI](https://circleci.com/gh/influx6/wire.svg?style=svg)](https://circleci.com/gh/influx6/wire)
 
 Mnet is a collection of superfast networking packages with implementations from ontop of `tcp`, `udp`, and others as planned. It exists to provide a lightweight foundation where other higher level APIs can 
 be built on.
@@ -10,12 +10,12 @@ be built on.
 ## Install
 
 ```
-go get -v github.com/influx6/mnet/...
+go get -v github.com/wirekit/wire/...
 ```
 
 ## Design
 
-Mnet presents a flexible design in the approach of hpw structures are built. The `mnet.Client` is a special case which is shared among the differing protocols of `tcp`, `udp` and `websocket`. Each provides the `mnet.Client` struct with appropriate methods to allow the client perform the expected operations required.
+Mnet presents a flexible design in the approach of hpw structures are built. The `wire.Client` is a special case which is shared among the differing protocols of `tcp`, `udp` and `websocket`. Each provides the `wire.Client` struct with appropriate methods to allow the client perform the expected operations required.
 
 This approach allows a massive level of flexibility and easily lets us swap in like lego blocks methods to power the underline protocol operations.
 

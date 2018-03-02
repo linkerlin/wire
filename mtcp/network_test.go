@@ -17,9 +17,9 @@ import (
 	"github.com/gokit/history"
 	"github.com/gokit/history/handlers/discard"
 	"github.com/influx6/faux/tests"
-	"github.com/influx6/mnet"
-	"github.com/influx6/mnet/certificates"
-	"github.com/influx6/mnet/mtcp"
+	"github.com/wirekit/wire"
+	"github.com/wirekit/wire/certificates"
+	"github.com/wirekit/wire/mtcp"
 )
 
 var (

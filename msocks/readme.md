@@ -9,7 +9,7 @@ Below are recently runned benchmarks, see [BenchmarkTests](./benchmark.txt) for 
 ```bash
 goos: darwin
 goarch: amd64
-pkg: github.com/influx6/mnet/msocks
+pkg: github.com/wirekit/wire/msocks
 BenchmarkNoBytesMessages-4    	50000000	        26.3 ns/op	 265.70 MB/s	       0 B/op	       0 allocs/op
 Benchmark2BytesMessages-4     	50000000	        26.5 ns/op	 340.20 MB/s	       0 B/op	       0 allocs/op
 Benchmark4BytesMessages-4     	50000000	        25.7 ns/op	 427.40 MB/s	       0 B/op	       0 allocs/op
@@ -24,7 +24,7 @@ Benchmark4KMessages-4         	50000000	        26.3 ns/op	156042.32 MB/s	      
 Benchmark8KMessages-4         	50000000	        27.0 ns/op	304163.43 MB/s	       0 B/op	       0 allocs/op
 Benchmark16KMessages-4        	50000000	        25.7 ns/op	636983.55 MB/s	       0 B/op	       0 allocs/op
 PASS
-ok  	github.com/influx6/mnet/msocks	18.466s
+ok  	github.com/wirekit/wire/msocks	18.466s
 
 ```
 

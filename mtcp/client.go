@@ -14,8 +14,8 @@ import (
 
 	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
-	"github.com/influx6/mnet"
-	"github.com/influx6/mnet/internal"
+	"github.com/wirekit/wire"
+	"github.com/wirekit/wire/internal"
 	uuid "github.com/satori/go.uuid"
 )
 

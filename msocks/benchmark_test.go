@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influx6/mnet"
-	"github.com/influx6/mnet/msocks"
+	"github.com/wirekit/wire"
+	"github.com/wirekit/wire/msocks"
 )
 
 var (

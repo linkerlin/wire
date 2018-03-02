@@ -7,8 +7,8 @@ import (
 	"context"
 
 	"github.com/influx6/faux/tests"
-	"github.com/influx6/mnet"
-	"github.com/influx6/mnet/mtcp"
+	"github.com/wirekit/wire"
+	"github.com/wirekit/wire/mtcp"
 )
 
 func TestNonTLSNetworkWithClient(t *testing.T) {
