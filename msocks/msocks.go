@@ -17,9 +17,9 @@ import (
 	"github.com/gobwas/ws/wsutil"
 	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
+	uuid "github.com/satori/go.uuid"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
-	uuid "github.com/satori/go.uuid"
 )
 
 var (

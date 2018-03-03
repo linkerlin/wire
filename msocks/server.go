@@ -18,10 +18,10 @@ import (
 	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/melon"
+	uuid "github.com/satori/go.uuid"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
 	"github.com/wirekit/wire/mlisten"
-	uuid "github.com/satori/go.uuid"
 )
 
 var (
@@ -32,6 +32,7 @@ var (
 	rescueBytes                   = []byte(wire.CRESCUE)
 	handshakeCompletedBytes       = []byte(wire.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(wire.ClientHandShakeCompleted)
+	handshakeSkipBytes       = []byte(wire.CLHandshakeSkip)
 )
 
 //************************************************************************
@@ -572,6 +573,11 @@ func (sc *websocketServerClient) handshake() error {
 				return wire.ErrFailedToRecieveInfo
 			}
 			continue
+		}
+		
+		if bytes.Equal(msg, handshakeSkipBytes) && !sc.isACluster {
+			sc.logs.Info("handshake process skipped")
+			return nil
 		}
 
 		// if we get a rescue signal, then client never got our CINFO request, so resent.

@@ -82,6 +82,11 @@ const (
 
 	// CLSTATUS defines a action key for responding with cluster status info.
 	CLSTATUS = "MNET:CLSTATUS "
+	
+	// CLHandshakeSkip defines action sent by client which is a non-cluster node
+	// and wishes to skip handshake process. This should be sent by client libraries
+	// that wish to
+	CLHandshakeSkip = "MNET:HS:SP "
 
 	// ClientHandshakeCompleted defines a action key for responding with a handshake completed
 	// to a client connection.

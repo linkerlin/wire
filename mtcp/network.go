@@ -19,10 +19,10 @@ import (
 	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/melon"
+	uuid "github.com/satori/go.uuid"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
 	"github.com/wirekit/wire/mlisten"
-	uuid "github.com/satori/go.uuid"
 )
 
 var (
@@ -32,6 +32,7 @@ var (
 	rescueBytes                   = []byte(wire.CRESCUE)
 	handshakeCompletedBytes       = []byte(wire.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(wire.ClientHandShakeCompleted)
+	handshakeSkipBytes       = []byte(wire.CLHandshakeSkip)
 )
 
 //************************************************************************
@@ -380,6 +381,12 @@ func (nc *tcpServerClient) handshake() error {
 			}
 			continue
 		}
+		
+		// if we are to skip handshake and this is not a cluster then skip.
+		if bytes.Equal(msg, handshakeSkipBytes) && !nc.isACluster {
+			nc.logs.Info("handshake process skipped")
+			return nil
+		}
 
 		// if we get a rescue signal, then client never got our CINFO request, so resent.
 		if bytes.Equal(msg, rescueBytes) {
@@ -470,7 +477,6 @@ func (nc *tcpServerClient) handshake() error {
 	}
 
 	nc.logs.Info("handshake completed")
-
 	return nil
 }
 

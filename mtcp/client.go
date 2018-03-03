@@ -14,9 +14,9 @@ import (
 
 	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
+	uuid "github.com/satori/go.uuid"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
-	uuid "github.com/satori/go.uuid"
 )
 
 // ConnectOptions defines a function type used to apply given
