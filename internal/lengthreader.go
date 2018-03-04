@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 
 	"encoding/binary"
-
-	"github.com/wirekit/wire"
 )
 
 const (
@@ -58,9 +56,9 @@ type LengthReader struct {
 func NewLengthReader(r io.Reader, headerLen int) *LengthReader {
 	return &LengthReader{
 		r:      r,
+		last:   512,
 		header: headerLen,
 		state:  nostate,
-		last:   wire.MinBufferSize,
 		area:   make([]byte, headerLen),
 	}
 }
@@ -198,9 +196,9 @@ type LengthRecvReader struct {
 func NewLengthRecvReader(r io.Reader, headerLen int) *LengthRecvReader {
 	return &LengthRecvReader{
 		r:      r,
+		last:   512,
 		header: headerLen,
 		state:  nostate,
-		last:   wire.MinBufferSize,
 		area:   make([]byte, headerLen),
 	}
 }
