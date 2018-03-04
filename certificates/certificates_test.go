@@ -16,8 +16,7 @@ func TestCertificateRequestService(t *testing.T) {
 	var store mocks.PersistenceStoreMock
 	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
 
-	serials := certificates.SerialService{Length: 128}
-	profile := certificates.CertificateProfile{
+	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
 		CommonName:   "DreamBench Inc",
@@ -25,31 +24,33 @@ func TestCertificateRequestService(t *testing.T) {
 		Province:     "South-West",
 	}
 
-	var service certificates.CertificateAuthorityService
 	service.KeyStrength = 4096
 	service.LifeTime = (time.Hour * 8760)
-	service.Profile = profile
-	service.Serials = serials
 	service.Emails = append([]string{}, "alex.ewetumo@dreambench.io")
 
-	ca, err := service.New()
+	ca, err := certificates.CreateCertificateAuthority(service)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateAuthority")
 	}
 	tests.Passed("Should have generated new CertificateAuthority")
 
-	var requestService certificates.CertificateRequestService
-	requestService.Profile = profile
+	requestService := certificates.CertificateRequestProfile{
+		Local:        "Lagos",
+		Organization: "DreamBench",
+		CommonName:   "DreamBench Inc",
+		Country:      "Nigeria",
+		Province:     "South-West",
+	}
 	requestService.KeyStrength = 2048
 
-	reqCA, err := requestService.New()
+	reqCA, err := certificates.CreateCertificateRequest(requestService)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
 
 	// Generate Client and Server Auth Certificate.
-	if err := ca.ApproveServerClientCertificateSigningRequest(&reqCA, serials, time.Hour*8760); err != nil {
+	if err := ca.ApproveServerClientCertificateSigningRequest(&reqCA, time.Hour*8760); err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
@@ -65,8 +66,7 @@ func TestCertificateRequestServiceForClient(t *testing.T) {
 	var store mocks.PersistenceStoreMock
 	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
 
-	serials := certificates.SerialService{Length: 128}
-	profile := certificates.CertificateProfile{
+	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
 		CommonName:   "DreamBench Inc",
@@ -74,31 +74,33 @@ func TestCertificateRequestServiceForClient(t *testing.T) {
 		Province:     "South-West",
 	}
 
-	var service certificates.CertificateAuthorityService
 	service.KeyStrength = 4096
 	service.LifeTime = (time.Hour * 8760)
-	service.Profile = profile
-	service.Serials = serials
 	service.Emails = append([]string{}, "alex.ewetumo@dreambench.io")
 
-	ca, err := service.New()
+	ca, err := certificates.CreateCertificateAuthority(service)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateAuthority")
 	}
 	tests.Passed("Should have generated new CertificateAuthority")
 
-	var requestService certificates.CertificateRequestService
-	requestService.Profile = profile
+	requestService := certificates.CertificateRequestProfile{
+		Local:        "Lagos",
+		Organization: "DreamBench",
+		CommonName:   "DreamBench Inc",
+		Country:      "Nigeria",
+		Province:     "South-West",
+	}
 	requestService.KeyStrength = 2048
 
-	reqCA, err := requestService.New()
+	reqCA, err := certificates.CreateCertificateRequest(requestService)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
 
 	// Generate Client and Server Auth Certificate.
-	if err := ca.ApproveClientCertificateSigningRequest(&reqCA, serials, time.Hour*8760); err != nil {
+	if err := ca.ApproveClientCertificateSigningRequest(&reqCA, time.Hour*8760); err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
@@ -124,8 +126,7 @@ func TestCertificateRequestServiceForServer(t *testing.T) {
 	var store mocks.PersistenceStoreMock
 	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
 
-	serials := certificates.SerialService{Length: 128}
-	profile := certificates.CertificateProfile{
+	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
 		CommonName:   "DreamBench Inc",
@@ -133,31 +134,33 @@ func TestCertificateRequestServiceForServer(t *testing.T) {
 		Province:     "South-West",
 	}
 
-	var service certificates.CertificateAuthorityService
 	service.KeyStrength = 4096
 	service.LifeTime = (time.Hour * 8760)
-	service.Profile = profile
-	service.Serials = serials
 	service.Emails = append([]string{}, "alex.ewetumo@dreambench.io")
 
-	ca, err := service.New()
+	ca, err := certificates.CreateCertificateAuthority(service)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateAuthority")
 	}
 	tests.Passed("Should have generated new CertificateAuthority")
 
-	var requestService certificates.CertificateRequestService
-	requestService.Profile = profile
+	requestService := certificates.CertificateRequestProfile{
+		Local:        "Lagos",
+		Organization: "DreamBench",
+		CommonName:   "DreamBench Inc",
+		Country:      "Nigeria",
+		Province:     "South-West",
+	}
 	requestService.KeyStrength = 2048
 
-	reqCA, err := requestService.New()
+	reqCA, err := certificates.CreateCertificateRequest(requestService)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
 
 	// Generate Client and Server Auth Certificate.
-	if err := ca.ApproveServerCertificateSigningRequest(&reqCA, serials, time.Hour*8760); err != nil {
+	if err := ca.ApproveServerCertificateSigningRequest(&reqCA, time.Hour*8760); err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
@@ -183,8 +186,7 @@ func TestCertificateRequestRawLoading(t *testing.T) {
 	var store mocks.PersistenceStoreMock
 	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
 
-	serials := certificates.SerialService{Length: 128}
-	profile := certificates.CertificateProfile{
+	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
 		CommonName:   "DreamBench Inc",
@@ -192,31 +194,33 @@ func TestCertificateRequestRawLoading(t *testing.T) {
 		Province:     "South-West",
 	}
 
-	var service certificates.CertificateAuthorityService
 	service.KeyStrength = 4096
 	service.LifeTime = (time.Hour * 8760)
-	service.Profile = profile
-	service.Serials = serials
 	service.Emails = append([]string{}, "alex.ewetumo@dreambench.io")
 
-	ca, err := service.New()
+	ca, err := certificates.CreateCertificateAuthority(service)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateAuthority")
 	}
 	tests.Passed("Should have generated new CertificateAuthority")
 
-	var requestService certificates.CertificateRequestService
-	requestService.Profile = profile
+	requestService := certificates.CertificateRequestProfile{
+		Local:        "Lagos",
+		Organization: "DreamBench",
+		CommonName:   "DreamBench Inc",
+		Country:      "Nigeria",
+		Province:     "South-West",
+	}
 	requestService.KeyStrength = 2048
 
-	reqCA, err := requestService.New()
+	reqCA, err := certificates.CreateCertificateRequest(requestService)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
 
 	// Generate Client and Server Auth Certificate.
-	if err := ca.ApproveServerClientCertificateSigningRequest(&reqCA, serials, time.Hour*8760); err != nil {
+	if err := ca.ApproveServerClientCertificateSigningRequest(&reqCA, time.Hour*8760); err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateRequest")
 	}
 	tests.Passed("Should have generated new CertificateRequest")
@@ -260,8 +264,7 @@ func TestCertificateService(t *testing.T) {
 	var store mocks.PersistenceStoreMock
 	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
 
-	serials := certificates.SerialService{Length: 128}
-	profile := certificates.CertificateProfile{
+	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
 		CommonName:   "DreamBench Inc",
@@ -269,14 +272,11 @@ func TestCertificateService(t *testing.T) {
 		Province:     "South-West",
 	}
 
-	var service certificates.CertificateAuthorityService
 	service.KeyStrength = 4096
 	service.LifeTime = (time.Hour * 8760)
-	service.Profile = profile
-	service.Serials = serials
 	service.Emails = append([]string{}, "alex.ewetumo@dreambench.io")
 
-	ca, err := service.New()
+	ca, err := certificates.CreateCertificateAuthority(service)
 	if err != nil {
 		tests.FailedWithError(err, "Should have generated new CertificateAuthority")
 	}

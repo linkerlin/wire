@@ -12,6 +12,7 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -58,24 +59,9 @@ var (
 		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 	}
+
+	buffpool = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
 )
-
-// SerialService defines a single method which always returns a serial number
-// of length 128 by default.
-type SerialService struct {
-	Length uint
-}
-
-// New returns a new serial number acording to provided limit.
-func (s SerialService) New() (*big.Int, error) {
-	limit := defaultSerialLength
-	if s.Length > 0 {
-		limit = s.Length
-	}
-
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), limit)
-	return rand.Int(rand.Reader, serialNumberLimit)
-}
 
 // PersistenceStore defines an interface which exposes a single method
 // to persist a giving data into an underline store.
@@ -123,21 +109,23 @@ func (sca SecondaryCertificateAuthority) CertificateRaw() ([]byte, error) {
 	}), nil
 }
 
-// Raw returns the whole CertificateAuthorty has a combined slice of bytes, with
+// Raw returns the whole Certificate Authority has a combined slice of bytes, with
 // total length and length of parts added at the beginning.
 // Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF ROOTCA KEY][2] [CERTIFICIATE][ROOTCA]
 // The above format then can be pulled and split properly to ensure matching data.
 func (sca SecondaryCertificateAuthority) Raw() ([]byte, error) {
-	var rootCABuffer bytes.Buffer
-	if err := pem.Encode(&rootCABuffer, &pem.Block{
+	rootCABuffer := buffpool.Get().(*bytes.Buffer)
+	defer buffpool.Put(rootCABuffer)
+	if err := pem.Encode(rootCABuffer, &pem.Block{
 		Type:  certTypeName,
 		Bytes: sca.RootCA.Raw,
 	}); err != nil {
 		return nil, err
 	}
 
-	var certBuffer bytes.Buffer
-	if err := pem.Encode(&certBuffer, &pem.Block{
+	certBuffer := buffpool.Get().(*bytes.Buffer)
+	defer buffpool.Put(certBuffer)
+	if err := pem.Encode(certBuffer, &pem.Block{
 		Type:  certKeyName,
 		Bytes: sca.Certificate.Raw,
 	}); err != nil {
@@ -182,14 +170,15 @@ func (ca CertificateAuthority) VerifyCA(cas *x509.Certificate, keyUsage []x509.E
 	return nil
 }
 
-// ApproveServerClientCertificateSigningRequest processes the provided CertificateRequest returning a new CertificateAuthorty
+// ApproveServerClientCertificateSigningRequest processes the provided CertificateRequest
+// returning a new Certificate Authority
 // which has being signed by this root CA.
 // All received signed by this method receive ExtKeyUsageServerAuth and ExtKeyUsageClientAuth.
-func (ca CertificateAuthority) ApproveServerClientCertificateSigningRequest(req *CertificateRequest, serial SerialService, lifeTime time.Duration) error {
+func (ca CertificateAuthority) ApproveServerClientCertificateSigningRequest(req *CertificateRequest, lifeTime time.Duration) error {
 	var secondaryCA SecondaryCertificateAuthority
 
 	usage := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}
-	template, err := ca.initCertificateRequest(req, serial, lifeTime, usage)
+	template, err := ca.initCertificateRequest(req, lifeTime, usage)
 	if err != nil {
 		return err
 	}
@@ -210,14 +199,15 @@ func (ca CertificateAuthority) ApproveServerClientCertificateSigningRequest(req 
 	return req.ValidateAndAccept(secondaryCA, usage)
 }
 
-// ApproveServerCertificateSigningRequest processes the provided CertificateRequest returning a new CertificateAuthorty
+// ApproveServerCertificateSigningRequest processes the provided CertificateRequest
+// returning a new Certificate Authority
 // which has being signed by this root CA.
 // All received signed by this method receive ExtKeyUsageServerAuth alone.
-func (ca CertificateAuthority) ApproveServerCertificateSigningRequest(req *CertificateRequest, serial SerialService, lifeTime time.Duration) error {
+func (ca CertificateAuthority) ApproveServerCertificateSigningRequest(req *CertificateRequest, lifeTime time.Duration) error {
 	var secondaryCA SecondaryCertificateAuthority
 
 	usage := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-	template, err := ca.initCertificateRequest(req, serial, lifeTime, usage)
+	template, err := ca.initCertificateRequest(req, lifeTime, usage)
 	if err != nil {
 		return err
 	}
@@ -238,14 +228,15 @@ func (ca CertificateAuthority) ApproveServerCertificateSigningRequest(req *Certi
 	return req.ValidateAndAccept(secondaryCA, usage)
 }
 
-// ApproveClientCertificateSigningRequest processes the provided CertificateRequest returning a new CertificateAuthorty
+// ApproveClientCertificateSigningRequest processes the provided CertificateRequest
+// returning a new Certificate Authority
 // which has being signed by this root CA.
 // All received signed by this method receive ExtKeyUsageClientAuth alone.
-func (ca CertificateAuthority) ApproveClientCertificateSigningRequest(req *CertificateRequest, serial SerialService, lifeTime time.Duration) error {
+func (ca CertificateAuthority) ApproveClientCertificateSigningRequest(req *CertificateRequest, lifeTime time.Duration) error {
 	var secondaryCA SecondaryCertificateAuthority
 
 	usage := []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
-	template, err := ca.initCertificateRequest(req, serial, lifeTime, usage)
+	template, err := ca.initCertificateRequest(req, lifeTime, usage)
 	if err != nil {
 		return err
 	}
@@ -266,8 +257,9 @@ func (ca CertificateAuthority) ApproveClientCertificateSigningRequest(req *Certi
 	return req.ValidateAndAccept(secondaryCA, usage)
 }
 
-func (ca CertificateAuthority) initCertificateRequest(creq *CertificateRequest, serial SerialService, lifeTime time.Duration, usages []x509.ExtKeyUsage) (*x509.Certificate, error) {
-	serialNumber, err := serial.New()
+func (ca CertificateAuthority) initCertificateRequest(creq *CertificateRequest, lifeTime time.Duration, usages []x509.ExtKeyUsage) (*x509.Certificate, error) {
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -278,8 +270,8 @@ func (ca CertificateAuthority) initCertificateRequest(creq *CertificateRequest, 
 	var template x509.Certificate
 	template.SerialNumber = serialNumber
 	template.Signature = req.Signature
-	template.SignatureAlgorithm = req.SignatureAlgorithm
 	template.PublicKey = req.PublicKey
+	template.SignatureAlgorithm = req.SignatureAlgorithm
 	template.PublicKeyAlgorithm = req.PublicKeyAlgorithm
 	template.Subject = req.Subject
 	template.Issuer = ca.Certificate.Subject
@@ -318,21 +310,23 @@ func (ca CertificateAuthority) CertificateRaw() ([]byte, error) {
 	}), nil
 }
 
-// Raw returns the whole CertificateAuthorty has a combined slice of bytes, with
+// Raw returns the whole Certificate Authority has a combined slice of bytes, with
 // total length and length of parts added at the beginning.
 // Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF PRIVATE KEY][2] [CERTIFICIATE][PRIVIATEKEY]
 // The above format then can be pulled and split properly to ensure matching data.
 func (ca CertificateAuthority) Raw() ([]byte, error) {
-	var certBuffer bytes.Buffer
-	if err := pem.Encode(&certBuffer, &pem.Block{
+	certBuffer := buffpool.Get().(*bytes.Buffer)
+	defer buffpool.Put(certBuffer)
+	if err := pem.Encode(certBuffer, &pem.Block{
 		Type:  certTypeName,
 		Bytes: ca.Certificate.Raw,
 	}); err != nil {
 		return nil, err
 	}
 
-	var keyBuffer bytes.Buffer
-	if err := pem.Encode(&keyBuffer, &pem.Block{
+	keyBuffer := buffpool.Get().(*bytes.Buffer)
+	defer buffpool.Put(keyBuffer)
+	if err := pem.Encode(keyBuffer, &pem.Block{
 		Type:  certKeyName,
 		Bytes: x509.MarshalPKCS1PrivateKey(ca.PrivateKey),
 	}); err != nil {
@@ -361,7 +355,7 @@ func (ca CertificateAuthority) Raw() ([]byte, error) {
 	return raw.Bytes(), nil
 }
 
-// FromRaw decodes the whole raw data into CertificateAuthorty, using the format below
+// FromRaw decodes the whole raw data into Certificate Authority, using the format below
 // Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF PRIVATE KEY][2] [CERTIFICIATE][PRIVIATEKEY]
 // The above format then can be pulled and split properly to ensure matching data.
 func (ca *CertificateAuthority) FromRaw(raw []byte) error {
@@ -529,9 +523,9 @@ func (ca *CertificateAuthority) TLSCert() (tls.Certificate, error) {
 	return tlsCert, nil
 }
 
-// CertificateProfile holds authority profile data which are used to
+// CertificateAuthorityProfile holds authority profile data which are used to
 // annotate a CA.
-type CertificateProfile struct {
+type CertificateAuthorityProfile struct {
 	Organization string `json:"org"`
 	Country      string `json:"country"`
 	Province     string `json:"province"`
@@ -539,18 +533,17 @@ type CertificateProfile struct {
 	Address      string `json:"address"`
 	Postal       string `json:"postal"`
 	CommonName   string `json:"common_name"`
-}
 
-// CertificateAuthorityService generates a certificate with associated private key
-// and public key, which can be saved into a giving persistent layer when supplied to
-// it's persist method
-type CertificateAuthorityService struct {
+	// Public and Private key configuration fields.
 	Version     int
 	KeyStrength int
-	LifeTime    time.Duration
-	// SignatureAlgorithm x509.SignatureAlgorithm
-	Profile   CertificateProfile
-	Serials   SerialService
+
+	// Lifetime of certificate authority.
+	LifeTime time.Duration
+
+	// SignatureAlgorithmn for creating certificates with.
+	SignatureAlgorithm x509.SignatureAlgorithm
+
 	KeyUsages []x509.ExtKeyUsage
 	Emails    []string
 	IPs       []string
@@ -565,13 +558,14 @@ type CertificateAuthorityService struct {
 	PermDNSNames []string
 }
 
-// New returns a new instance of CertificateAuthorty which implements the
+// CreateCertificateAuthority returns a new instance of Certificate Authority which implements the
 // the necessary interface to write given certificate data into memory or
 // into a given store.
-func (cas CertificateAuthorityService) New() (CertificateAuthority, error) {
+func CreateCertificateAuthority(cas CertificateAuthorityProfile) (CertificateAuthority, error) {
 	var ca CertificateAuthority
 
-	serial, err := cas.Serials.New()
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
 		return ca, err
 	}
@@ -579,6 +573,10 @@ func (cas CertificateAuthorityService) New() (CertificateAuthority, error) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
 	if err != nil {
 		return ca, err
+	}
+
+	if cas.SignatureAlgorithm <= 0 {
+		cas.SignatureAlgorithm = x509.SHA256WithRSA
 	}
 
 	ca.PrivateKey = privateKey
@@ -593,13 +591,13 @@ func (cas CertificateAuthorityService) New() (CertificateAuthority, error) {
 	before := time.Now()
 
 	var profile pkix.Name
-	profile.CommonName = cas.Profile.CommonName
-	profile.Organization = []string{cas.Profile.Organization}
-	profile.Country = []string{cas.Profile.Country}
-	profile.Province = []string{cas.Profile.Province}
-	profile.Locality = []string{cas.Profile.Local}
-	profile.StreetAddress = []string{cas.Profile.Address}
-	profile.PostalCode = []string{cas.Profile.Postal}
+	profile.CommonName = cas.CommonName
+	profile.Organization = []string{cas.Organization}
+	profile.Country = []string{cas.Country}
+	profile.Province = []string{cas.Province}
+	profile.Locality = []string{cas.Local}
+	profile.StreetAddress = []string{cas.Address}
+	profile.PostalCode = []string{cas.Postal}
 
 	var template x509.Certificate
 	template.Version = cas.Version
@@ -613,8 +611,7 @@ func (cas CertificateAuthorityService) New() (CertificateAuthority, error) {
 	template.BasicConstraintsValid = true
 	template.NotAfter = before.Add(cas.LifeTime)
 	template.ExcludedDNSDomains = cas.ExedDNSNames
-	template.SignatureAlgorithm = x509.SHA256WithRSA
-	// template.SignatureAlgorithm = cas.SignatureAlgorithm
+	template.SignatureAlgorithm = cas.SignatureAlgorithm
 	template.KeyUsage = x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign
 	template.ExtKeyUsage = append([]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, cas.KeyUsages...)
 
@@ -634,6 +631,95 @@ func (cas CertificateAuthorityService) New() (CertificateAuthority, error) {
 	}
 
 	ca.Certificate = parsedCertificate
+
+	return ca, nil
+}
+
+// CertificateRequestProfile generates a certificate request with associated private key
+// and public key, which can be sent over the wire or directly to a CeritificateAuthority
+// for signing.
+type CertificateRequestProfile struct {
+	Organization string `json:"org"`
+	Country      string `json:"country"`
+	Province     string `json:"province"`
+	Local        string `json:"local"`
+	Address      string `json:"address"`
+	Postal       string `json:"postal"`
+	CommonName   string `json:"common_name"`
+
+	// SignatureAlgorithm for creating certificates with.
+	SignatureAlgorithm x509.SignatureAlgorithm
+
+	// Public and Private key configuration fields.
+	Version     int
+	KeyStrength int
+
+	// Emails and ip address allowed.
+	Emails []string
+	IPs    []string
+
+	// General list of DNSNames for certificate.
+	DNSNames []string
+
+	// DNSNames to be excluded.
+	ExDNSNames []string
+
+	// DNSNames to be permitted.
+	PermDNSNames []string
+}
+
+// New returns a new instance of Certificate Authority which implements the
+// the necessary interface to write given certificate data into memory or
+// into a given store.
+func CreateCertificateRequest(cas CertificateRequestProfile) (CertificateRequest, error) {
+	var ca CertificateRequest
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
+	if err != nil {
+		return ca, err
+	}
+
+	if cas.SignatureAlgorithm <= 0 {
+		cas.SignatureAlgorithm = x509.SHA256WithRSA
+	}
+
+	ca.PrivateKey = privateKey
+	ca.PublicKey = &privateKey.PublicKey
+
+	var ips []net.IP
+
+	for _, ip := range cas.IPs {
+		ips = append(ips, net.ParseIP(ip))
+	}
+
+	var profile pkix.Name
+	profile.CommonName = cas.CommonName
+	profile.Organization = []string{cas.Organization}
+	profile.Country = []string{cas.Country}
+	profile.Province = []string{cas.Province}
+	profile.Locality = []string{cas.Local}
+	profile.StreetAddress = []string{cas.Address}
+	profile.PostalCode = []string{cas.Postal}
+
+	var template x509.CertificateRequest
+	template.Version = cas.Version
+	template.IPAddresses = ips
+	template.Subject = profile
+	template.DNSNames = cas.DNSNames
+	template.EmailAddresses = cas.Emails
+	template.SignatureAlgorithm = cas.SignatureAlgorithm
+
+	certData, err := x509.CreateCertificateRequest(rand.Reader, &template, ca.PrivateKey)
+	if err != nil {
+		return ca, err
+	}
+
+	parsedRequest, err := x509.ParseCertificateRequest(certData)
+	if err != nil {
+		return ca, err
+	}
+
+	ca.Request = parsedRequest
 
 	return ca, nil
 }
@@ -753,7 +839,7 @@ func (ca *CertificateRequest) IsValid(keyUsage []x509.ExtKeyUsage) error {
 // this incoming ones match the Certificate request data.
 // It uses Sha256
 func (ca *CertificateRequest) ValidateAndAccept(sec SecondaryCertificateAuthority, keyUsage []x509.ExtKeyUsage) error {
-	if sec.Certificate.SignatureAlgorithm != x509.SHA256WithRSA {
+	if sec.Certificate.SignatureAlgorithm != ca.Request.SignatureAlgorithm {
 		return ErrWrongSignatureAlgorithmn
 	}
 
@@ -793,7 +879,7 @@ func (ca *CertificateRequest) TLSServerConfig(verifyClient bool) (*tls.Config, e
 	return ca.TLSConfigWithClientCA(pool, verifyClient)
 }
 
-// TLSConfigWithRootCA returns a tls.Config which recieves the tls.Certificate from TLSCert()
+// TLSConfigWithRootCA returns a tls.Config which receives the tls.Certificate from TLSCert()
 // and uses that for tls authentication and encryption. It uses the provided CertPool has the
 // RootCAs for the tlsConfig returned.
 // Use this to generate tls.Config for the server receiving client connection to ensure client
@@ -816,7 +902,7 @@ func (ca *CertificateRequest) TLSConfigWithRootCA(rootCAPool *x509.CertPool, ver
 	return &tlsConfig, nil
 }
 
-// TLSConfigWithClientCA returns a tls.Config which recieves the tls.Certificate from TLSCert()
+// TLSConfigWithClientCA returns a tls.Config which receives the tls.Certificate from TLSCert()
 // and uses that for tls authentication and encryption. It uses the provided CertPool has the
 // ClientCA for the tlsConfig returned.
 // Use this to generate tls.Config for the client connecting to a tls Server that requires client
@@ -877,9 +963,10 @@ func (ca *CertificateRequest) TLSCert() (tls.Certificate, error) {
 	return tlsCert, nil
 }
 
-// Raw returns the whole CertificateAuthorty has a combined slice of bytes, with
+// Raw returns the whole Certificate Authority has a combined slice of bytes, with
 // total length and length of parts added at the beginning.
-// Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE REQUEST][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF ROOTCA KEY][2] [CERTIFICIATE][ROOTCA]
+// Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE REQUEST][2]
+// [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF ROOTCA KEY][2] [CERTIFICIATE][ROOTCA]
 // The above format then can be pulled and split properly to ensure matching data.
 // WARNING: The private key is not included within the raw bytes.
 func (ca CertificateRequest) Raw() ([]byte, error) {
@@ -925,7 +1012,7 @@ func (ca CertificateRequest) Raw() ([]byte, error) {
 	return raw.Bytes(), nil
 }
 
-// FromRaw decodes the whole raw data into CertificateAuthorty, using the format below
+// FromRaw decodes the whole raw data into Certificate Authority, using the format below
 // Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE REQUEST][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF ROOTCA KEY][2] [CERTIFICIATE][ROOTCA]
 // The above format then can be pulled and split properly to ensure matching data.
 // WARNING: The private key is not included within the raw bytes.
@@ -998,77 +1085,4 @@ func (ca *CertificateRequest) FromRaw(raw []byte) error {
 
 	ca.SecondaryCA.RootCA = rootCA
 	return nil
-}
-
-// CertificateRequestService generates a certificate request with associated private key
-// and public key, which can be sent over the wire or directly to a CeritificateAuthority
-// for signing.
-type CertificateRequestService struct {
-	Version     int
-	KeyStrength int
-	Profile     CertificateProfile
-	Emails      []string
-	IPs         []string
-	// SignatureAlgorithmn x509.SignatureAlgorithm
-
-	// General list of DNSNames for certificate.
-	DNSNames []string
-
-	// DNSNames to be excluded.
-	ExDNSNames []string
-
-	// DNSNames to be permitted.
-	PermDNSNames []string
-}
-
-// New returns a new instance of CertificateAuthorty which implements the
-// the necessary interface to write given certificate data into memory or
-// into a given store.
-func (cas CertificateRequestService) New() (CertificateRequest, error) {
-	var ca CertificateRequest
-
-	privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
-	if err != nil {
-		return ca, err
-	}
-
-	ca.PrivateKey = privateKey
-	ca.PublicKey = &privateKey.PublicKey
-
-	var ips []net.IP
-
-	for _, ip := range cas.IPs {
-		ips = append(ips, net.ParseIP(ip))
-	}
-
-	var profile pkix.Name
-	profile.CommonName = cas.Profile.CommonName
-	profile.Organization = []string{cas.Profile.Organization}
-	profile.Country = []string{cas.Profile.Country}
-	profile.Province = []string{cas.Profile.Province}
-	profile.Locality = []string{cas.Profile.Local}
-	profile.StreetAddress = []string{cas.Profile.Address}
-	profile.PostalCode = []string{cas.Profile.Postal}
-
-	var template x509.CertificateRequest
-	template.Version = cas.Version
-	template.IPAddresses = ips
-	template.Subject = profile
-	template.DNSNames = cas.DNSNames
-	template.EmailAddresses = cas.Emails
-	template.SignatureAlgorithm = x509.SHA256WithRSA
-
-	certData, err := x509.CreateCertificateRequest(rand.Reader, &template, ca.PrivateKey)
-	if err != nil {
-		return ca, err
-	}
-
-	parsedRequest, err := x509.ParseCertificateRequest(certData)
-	if err != nil {
-		return ca, err
-	}
-
-	ca.Request = parsedRequest
-
-	return ca, nil
 }
