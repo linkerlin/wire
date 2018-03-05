@@ -81,6 +81,18 @@
 			"revisionTime": "2017-03-21T23:07:31Z"
 		},
 		{
+			"checksumSHA1": "DvH7vztzAqYOu/WfXosUUfXlYfg=",
+			"path": "github.com/wirekit/llio",
+			"revision": "77346282e694e919717c1eb031c7dd4352b55555",
+			"revisionTime": "2018-03-04T19:02:03Z"
+		},
+		{
+			"checksumSHA1": "NcefnnIlndFkOmgjHzZKG/Z6tuo=",
+			"path": "github.com/wirekit/tlsfs/certificates",
+			"revision": "f24b073f345e59f37e22f23138cebefb8378def1",
+			"revisionTime": "2018-03-04T22:04:58Z"
+		},
+		{
 			"checksumSHA1": "gRu2kYXXhEN+A+NpuAuMrjuiud0=",
 			"path": "golang.org/x/sys/unix",
 			"revision": "810d7000345868fc619eb81f46307107118f4ae1",

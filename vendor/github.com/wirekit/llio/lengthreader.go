@@ -1,4 +1,4 @@
-package internal
+package llio
 
 import (
 	"errors"
@@ -27,6 +27,12 @@ var (
 	ErrUncompletedTransfer = errors.New("reader data is less than expected size")
 	ErrReadStateError      = errors.New("invalid read state; first read header before reading data")
 	ErrPendingReads        = errors.New("invalid read state: still pending data for last header remaining")
+	ErrTotalExceeded       = errors.New("specified data size exceeded, rejecting write")
+	ErrLimitExceeded       = errors.New("writer space exceeded")
+	ErrNotStream           = errors.New("data is not a stream transmission")
+	ErrStreamDataParts     = errors.New("invalid stream data, expected 2 part pieces")
+	ErrHeaderLength        = errors.New("invalid header, header length not matching expected")
+	ErrInvalidHeader       = errors.New("invalid header data max size: must be either int16, int32, int64 range")
 )
 
 //*****************************************************************

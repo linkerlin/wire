@@ -15,6 +15,7 @@ import (
 	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	uuid "github.com/satori/go.uuid"
+	"github.com/wirekit/llio"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
 )
@@ -207,7 +208,7 @@ func (cn *clientNetwork) sendRescue() error {
 }
 
 func (cn *clientNetwork) respondToINFO(conn net.Conn, reader io.Reader) error {
-	lreader := internal.NewLengthRecvReader(reader, wire.HeaderLength)
+	lreader := llio.NewLengthRecvReader(reader, wire.HeaderLength)
 	msg := make([]byte, wire.SmallestMinBufferSize)
 
 	var attempts int
@@ -416,7 +417,7 @@ func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 		return nil, wire.ErrAlreadyClosed
 	}
 
-	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
+	return llio.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&cn.MessageWritten, 1)
 		atomic.AddInt64(&cn.totalWritten, int64(len(data)))
 
@@ -485,7 +486,7 @@ func (cn *clientNetwork) readLoop(conn net.Conn) {
 	defer cn.worker.Done()
 
 	connReader := bufio.NewReaderSize(conn, cn.maxWrite)
-	lreader := internal.NewLengthRecvReader(connReader, wire.HeaderLength)
+	lreader := llio.NewLengthRecvReader(connReader, wire.HeaderLength)
 
 	var incoming []byte
 

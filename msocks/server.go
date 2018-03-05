@@ -19,6 +19,7 @@ import (
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/melon"
 	uuid "github.com/satori/go.uuid"
+	"github.com/wirekit/llio"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
 	"github.com/wirekit/wire/mlisten"
@@ -32,7 +33,7 @@ var (
 	rescueBytes                   = []byte(wire.CRESCUE)
 	handshakeCompletedBytes       = []byte(wire.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(wire.ClientHandShakeCompleted)
-	handshakeSkipBytes       = []byte(wire.CLHandshakeSkip)
+	handshakeSkipBytes            = []byte(wire.CLHandshakeSkip)
 )
 
 //************************************************************************
@@ -108,7 +109,7 @@ func (sc *websocketServerClient) write(size int) (io.WriteCloser, error) {
 	conn = sc.conn
 	sc.cu.Unlock()
 
-	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
+	return llio.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&sc.totalReadMsgs, 1)
 		atomic.AddInt64(&sc.totalWritten, int64(len(data)))
 
@@ -339,7 +340,7 @@ func (sc *websocketServerClient) readLoop(conn net.Conn, reader *wsutil.Reader) 
 	defer sc.close()
 	defer sc.waiter.Done()
 
-	lreader := internal.NewLengthRecvReader(reader, wire.HeaderLength)
+	lreader := llio.NewLengthRecvReader(reader, wire.HeaderLength)
 	incoming := make([]byte, wire.SmallestMinBufferSize)
 
 	logs := sc.logs.WithTitle("websocketServerClient.readLoop")
@@ -574,7 +575,7 @@ func (sc *websocketServerClient) handshake() error {
 			}
 			continue
 		}
-		
+
 		if bytes.Equal(msg, handshakeSkipBytes) && !sc.isACluster {
 			sc.logs.Info("handshake process skipped")
 			return nil

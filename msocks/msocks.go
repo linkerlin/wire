@@ -18,6 +18,7 @@ import (
 	"github.com/gokit/history"
 	"github.com/influx6/faux/netutils"
 	uuid "github.com/satori/go.uuid"
+	"github.com/wirekit/llio"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
 )
@@ -221,7 +222,7 @@ func (cn *socketClient) respondToINFO(conn net.Conn, reader io.Reader) error {
 	bctx.With("client", cn.id).With("network", cn.nid)
 	bctx.With("local-addr", cn.localAddr).With("remote-addr", cn.remoteAddr).With("server-addr", cn.serverAddr)
 
-	lreader := internal.NewLengthRecvReader(reader, wire.HeaderLength)
+	lreader := llio.NewLengthRecvReader(reader, wire.HeaderLength)
 	msg := make([]byte, wire.SmallestMinBufferSize)
 
 	var attempts int

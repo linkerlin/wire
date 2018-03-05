@@ -20,6 +20,7 @@ import (
 	"github.com/influx6/faux/netutils"
 	"github.com/influx6/melon"
 	uuid "github.com/satori/go.uuid"
+	"github.com/wirekit/llio"
 	"github.com/wirekit/wire"
 	"github.com/wirekit/wire/internal"
 	"github.com/wirekit/wire/mlisten"
@@ -32,7 +33,7 @@ var (
 	rescueBytes                   = []byte(wire.CRESCUE)
 	handshakeCompletedBytes       = []byte(wire.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(wire.ClientHandShakeCompleted)
-	handshakeSkipBytes       = []byte(wire.CLHandshakeSkip)
+	handshakeSkipBytes            = []byte(wire.CLHandshakeSkip)
 )
 
 //************************************************************************
@@ -381,7 +382,7 @@ func (nc *tcpServerClient) handshake() error {
 			}
 			continue
 		}
-		
+
 		// if we are to skip handshake and this is not a cluster then skip.
 		if bytes.Equal(msg, handshakeSkipBytes) && !nc.isACluster {
 			nc.logs.Info("handshake process skipped")
@@ -494,7 +495,7 @@ func (nc *tcpServerClient) write(inSize int) (io.WriteCloser, error) {
 		return nil, wire.ErrAlreadyClosed
 	}
 
-	return internal.NewActionLengthWriter(func(size []byte, data []byte) error {
+	return llio.NewActionLengthWriter(func(size []byte, data []byte) error {
 		atomic.AddInt64(&nc.totalWritten, 1)
 		atomic.AddInt64(&nc.totalWritten, int64(len(data)))
 
@@ -596,7 +597,7 @@ func (nc *tcpServerClient) readLoop() {
 	nc.mu.RUnlock()
 
 	connReader := bufio.NewReaderSize(cn, nc.maxWrite)
-	lreader := internal.NewLengthRecvReader(connReader, wire.HeaderLength)
+	lreader := llio.NewLengthRecvReader(connReader, wire.HeaderLength)
 
 	var incoming []byte
 
