@@ -185,6 +185,7 @@ func createTLSCA() (ca certificates.CertificateAuthority, server, client certifi
 
 	var requestService certificates.CertificateRequestProfile
 	requestService.KeyStrength = 2048
+	requestService.CommonName = "*"
 
 	ca, err = certificates.CreateCertificateAuthority(service)
 	if err != nil {
