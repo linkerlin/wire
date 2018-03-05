@@ -1,7 +1,6 @@
 package certificates
 
 import (
-	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -13,7 +12,6 @@ import (
 	"errors"
 	"math/big"
 	"net"
-	"sync"
 	"time"
 )
 
@@ -70,8 +68,6 @@ var (
 		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 	}
-
-	buffpool = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
 )
 
 // PrivateKeyType defines the type of supported private key types.
