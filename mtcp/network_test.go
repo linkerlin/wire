@@ -17,8 +17,8 @@ import (
 	"github.com/gokit/history"
 	"github.com/gokit/history/handlers/discard"
 	"github.com/influx6/faux/tests"
+	"github.com/wirekit/tlsfs/certificates"
 	"github.com/wirekit/wire"
-	"github.com/wirekit/wire/certificates"
 	"github.com/wirekit/wire/mtcp"
 )
 
