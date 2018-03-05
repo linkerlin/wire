@@ -392,33 +392,17 @@ type CertificateAuthorityProfile struct {
 // the necessary interface to write given certificate data into memory or
 // into a given store.
 func CreateCertificateAuthority(cas CertificateAuthorityProfile) (CertificateAuthority, error) {
+	var err error
 	var ca CertificateAuthority
+	ca.PrivateKey, ca.PublicKey, err = CreatePrivateKey(cas.PrivateKeyType, cas.KeyStrength, elliptic.P384())
+	if err != nil {
+		return ca, err
+	}
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(rand.Reader, serialNumberLimit)
 	if err != nil {
 		return ca, err
-	}
-
-	switch cas.PrivateKeyType {
-	case RSAKeyType:
-		privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
-		if err != nil {
-			return ca, err
-		}
-
-		ca.PrivateKey = privateKey
-		ca.PublicKey = &privateKey.PublicKey
-	case ECDSAKeyType:
-		privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-		if err != nil {
-			return ca, err
-		}
-
-		ca.PrivateKey = privateKey
-		ca.PublicKey = privateKey.PublicKey
-	default:
-		return ca, ErrUnknownPrivateKeyType
 	}
 
 	ca.KeyType = cas.PrivateKeyType
@@ -480,6 +464,41 @@ func CreateCertificateAuthority(cas CertificateAuthorityProfile) (CertificateAut
 }
 
 //********************************************************************************************
+// Private Key Generation
+//********************************************************************************************
+
+// CreatePrivateKey defines a function which will return a private and public key, and any
+// error that may occur. It uses the strength argument if the key type is for rsa and uses
+// the curve argument if it's a ecdsa key type.
+func CreatePrivateKey(ktype PrivateKeyType, strength int, curve elliptic.Curve) (privateKey interface{}, publicKey interface{}, err error) {
+	switch ktype {
+	case RSAKeyType:
+		pkey, perr := rsa.GenerateKey(rand.Reader, strength)
+		if perr != nil {
+			err = perr
+			return
+		}
+
+		privateKey = pkey
+		publicKey = &pkey.PublicKey
+		return
+	case ECDSAKeyType:
+		pkey, perr := ecdsa.GenerateKey(curve, rand.Reader)
+		if perr != nil {
+			err = perr
+			return
+		}
+
+		privateKey = pkey
+		publicKey = &pkey.PublicKey
+		return
+	}
+
+	err = ErrUnknownPrivateKeyType
+	return
+}
+
+//********************************************************************************************
 // CertificateReuqestProfile Implementation
 //********************************************************************************************
 
@@ -525,27 +544,11 @@ type CertificateRequestProfile struct {
 // the necessary interface to write given certificate data into memory or
 // into a given store.
 func CreateCertificateRequest(cas CertificateRequestProfile) (CertificateRequest, error) {
+	var err error
 	var ca CertificateRequest
-
-	switch cas.PrivateKeyType {
-	case RSAKeyType:
-		privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
-		if err != nil {
-			return ca, err
-		}
-
-		ca.PrivateKey = privateKey
-		ca.PublicKey = &privateKey.PublicKey
-	case ECDSAKeyType:
-		privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-		if err != nil {
-			return ca, err
-		}
-
-		ca.PrivateKey = privateKey
-		ca.PublicKey = privateKey.PublicKey
-	default:
-		return ca, ErrUnknownPrivateKeyType
+	ca.PrivateKey, ca.PublicKey, err = CreatePrivateKey(cas.PrivateKeyType, cas.KeyStrength, elliptic.P384())
+	if err != nil {
+		return ca, err
 	}
 
 	ca.KeyType = cas.PrivateKeyType
