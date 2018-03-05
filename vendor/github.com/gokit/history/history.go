@@ -62,11 +62,12 @@ type Ctx interface {
 	Yellow(string, ...interface{}) Ctx
 	Error(error, string, ...interface{}) Ctx
 
-	WithFields(Attrs) Ctx
 	WithTags(...string) Ctx
-	WithCompute(...Compute) Ctx
-	With(string, interface{}) Ctx
+	WithFields(Attrs, ...string) Ctx
+	WithCompute([]string, ...Compute) Ctx
+	WithHandler([]string, ...Handler) Ctx
 	WithTitle(string, ...interface{}) Ctx
+	With(string, interface{}, ...string) Ctx
 }
 
 // WithHandlers  returns a new Source with giving Handlers as receivers of
@@ -82,19 +83,23 @@ func WithTags(hs ...string) Ctx {
 }
 
 // With returns a new Ctx adding the giving key-value.
-func With(k string, v interface{}) Ctx {
-	return (&BugLog{Signature: randName(20), Fields: make(map[string]Field), From: time.Now()}).addKV(k, v)
-}
-
-// WithTitle returns a new Ctx setting the BugLog.Title.
-func WithTitle(title string) Ctx {
-	return &BugLog{Signature: randName(20), Fields: make(map[string]Field), Title: title, From: time.Now()}
+func With(k string, v interface{}, tags ...string) Ctx {
+	return (&BugLog{Signature: randName(20), Tags: tags, Fields: make(map[string]Field), From: time.Now()}).addKV(k, v)
 }
 
 // WithFields returns a new Source with giving fields as default tags
 // added to all B instances submitted through Source's Ctx instances.
-func WithFields(attr Attrs) Ctx {
-	return (&BugLog{Signature: randName(20), Fields: make(map[string]Field), From: time.Now()}).addKVS(attr)
+func WithFields(attr Attrs, tags ...string) Ctx {
+	return (&BugLog{Signature: randName(20), Tags: tags, Fields: make(map[string]Field), From: time.Now()}).addKVS(attr)
+}
+
+// WithTitle returns a new Ctx setting the BugLog.Title.
+func WithTitle(title string, v ...interface{}) Ctx {
+	if len(v) != 0 {
+		title = fmt.Sprintf(title, v...)
+	}
+
+	return &BugLog{Signature: randName(20), Fields: make(map[string]Field), Title: title, From: time.Now()}
 }
 
 //**************************************************************
@@ -283,28 +288,47 @@ type BugLog struct {
 	computes []Compute
 }
 
-// WithCompute adds giving computation into giving bug.
-func (b *BugLog) WithCompute(c ...Compute) Ctx {
+// WithHandler adds giving handler into returned Ctx.
+func (b *BugLog) WithHandler(tags []string, c ...Handler) Ctx {
 	if len(c) == 0 {
 		return b
 	}
 
-	br := b.branch()
+	var cr Handlers
+
+	if len(c) == 1 {
+		cr = Handlers{b.bugs, c[0]}
+	} else {
+		cr = Handlers{Handlers(c), b.bugs}
+	}
+
+	br := b.branch().addTags(tags...)
+	br.bugs = cr
+	return br
+}
+
+// WithCompute adds giving computation into giving bug.
+func (b *BugLog) WithCompute(tags []string, c ...Compute) Ctx {
+	if len(c) == 0 {
+		return b
+	}
+
+	br := b.branch().addTags(tags...)
 	br.computes = append(b.computes, c...)
 	return br
 }
 
 // WithFields returns a new instance of BugLog from source but unique
 // and sets giving fields.
-func (b *BugLog) WithFields(kv Attrs) Ctx {
+func (b *BugLog) WithFields(kv Attrs, tags ...string) Ctx {
 	if len(kv) == 0 {
 		return b
 	}
 
-	return b.branch().addKVS(kv)
+	return b.branch().addKVS(kv).addTags(tags...)
 }
 
-func (b *BugLog) addKVS(kv Attrs) Ctx {
+func (b *BugLog) addKVS(kv Attrs) *BugLog {
 	for k, v := range kv {
 		if before, ok := b.Fields[k]; ok {
 			before.Value = v
@@ -321,11 +345,11 @@ func (b *BugLog) addKVS(kv Attrs) Ctx {
 
 // With returns a new instance of BugLog from source but unique
 // and adds key-value pair into Ctx.
-func (b *BugLog) With(k string, v interface{}) Ctx {
-	return b.branch().addKV(k, v)
+func (b *BugLog) With(k string, v interface{}, tags ...string) Ctx {
+	return b.branch().addKV(k, v).addTags(tags...)
 }
 
-func (b *BugLog) addKV(k string, v interface{}) Ctx {
+func (b *BugLog) addKV(k string, v interface{}, tags ...string) *BugLog {
 	if before, ok := b.Fields[k]; ok {
 		before.Value = v
 		b.Fields[k] = before
@@ -345,9 +369,12 @@ func (b *BugLog) WithTags(tags ...string) Ctx {
 		return b
 	}
 
-	br := b.branch()
-	br.Tags = append(br.Tags, tags...)
-	return br
+	return b.branch().addTags(tags...)
+}
+
+func (b *BugLog) addTags(tags ...string) *BugLog {
+	b.Tags = append(b.Tags, tags...)
+	return b
 }
 
 // FromTitle returns a new instance of BugLog from source but unique

@@ -39,34 +39,34 @@
 			"revisionTime": "2018-01-14T19:52:27Z"
 		},
 		{
-			"checksumSHA1": "O1CN7eAvNIEXKkxAV0/mFDkPYrM=",
+			"checksumSHA1": "tfn2gdiYb5EnRSeUpAyk52Xp4DA=",
 			"path": "github.com/gokit/history",
-			"revision": "1b2a84748e7a18d14756c74d96f653b056d9cb99",
-			"revisionTime": "2018-03-02T17:55:17Z"
+			"revision": "3f561b41f5a3abf5afc5c0482f1de7151775b914",
+			"revisionTime": "2018-03-05T10:48:35Z"
 		},
 		{
 			"checksumSHA1": "tP/RnDHsBzR+2NiIgmR0omGkkTg=",
 			"path": "github.com/gokit/history/handlers/discard",
-			"revision": "1b2a84748e7a18d14756c74d96f653b056d9cb99",
-			"revisionTime": "2018-03-02T17:55:17Z"
+			"revision": "3f561b41f5a3abf5afc5c0482f1de7151775b914",
+			"revisionTime": "2018-03-05T10:48:35Z"
 		},
 		{
 			"checksumSHA1": "oY2QEuLnVlIau98TgwR1KiGQzjc=",
 			"path": "github.com/influx6/faux/netutils",
-			"revision": "26a981c3ac0ea4aee5903ee035950619836643c5",
-			"revisionTime": "2018-02-27T21:05:24Z"
+			"revision": "79fa50eff2f549ebbbf268c48942c86a1605d931",
+			"revisionTime": "2018-03-03T19:20:10Z"
 		},
 		{
 			"checksumSHA1": "1HUry0EiJTnSykWVkWw7ekJ9Zvk=",
 			"path": "github.com/influx6/faux/pools/pbytes",
-			"revision": "26a981c3ac0ea4aee5903ee035950619836643c5",
-			"revisionTime": "2018-02-27T21:05:24Z"
+			"revision": "79fa50eff2f549ebbbf268c48942c86a1605d931",
+			"revisionTime": "2018-03-03T19:20:10Z"
 		},
 		{
 			"checksumSHA1": "/PE0RGwoNeVkhlVKWxnIt0TgAA4=",
 			"path": "github.com/influx6/faux/tests",
-			"revision": "26a981c3ac0ea4aee5903ee035950619836643c5",
-			"revisionTime": "2018-02-27T21:05:24Z"
+			"revision": "79fa50eff2f549ebbbf268c48942c86a1605d931",
+			"revisionTime": "2018-03-03T19:20:10Z"
 		},
 		{
 			"checksumSHA1": "834Na7DxP//h7xitMUbPKCeXR80=",
@@ -81,7 +81,7 @@
 			"revisionTime": "2017-03-21T23:07:31Z"
 		},
 		{
-			"checksumSHA1": "++MsxaBN30inOcAz7KvFGddE7ic=",
+			"checksumSHA1": "gRu2kYXXhEN+A+NpuAuMrjuiud0=",
 			"path": "golang.org/x/sys/unix",
 			"revision": "810d7000345868fc619eb81f46307107118f4ae1",
 			"revisionTime": "2018-01-09T14:25:55Z"
