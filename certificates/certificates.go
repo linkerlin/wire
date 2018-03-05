@@ -2,12 +2,13 @@ package certificates
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/binary"
 	"encoding/pem"
 	"errors"
 	"math/big"
@@ -25,7 +26,9 @@ const (
 	reqcertKeyFileName         = "req_ca.key"
 	reqcertRootCAFileName      = "req_root_ca.cert"
 	certTypeName               = "CERTIFICATE"
+	certReqTypeName            = "CERTIFICATE REQUEST"
 	certKeyName                = "RSA PRIVATE KEY"
+	certECDSAKeyName           = "EC PRIVATE KEY"
 )
 
 // errors ...
@@ -38,6 +41,7 @@ var (
 	ErrNoPrivateKey             = errors.New("has no private key")
 	ErrWrongSignatureAlgorithmn = errors.New("incorrect signature algorithmn received")
 	ErrInvalidPemBlock          = errors.New("pem.Decode found no pem.Block data")
+	ErrInvalidPrivateKey        = errors.New("private key is invalid")
 	ErrInvalidCABlockType       = errors.New("pem.Block has invalid block header for ca cert")
 	ErrInvalidCAKeyBlockType    = errors.New("pem.Block has invalid block header for ca key")
 	ErrEmptyCARawSlice          = errors.New("CA Raw slice is empty")
@@ -46,6 +50,9 @@ var (
 	ErrInvalidRootCARawLength   = errors.New("RootCA Raw slice length is invalid")
 	ErrInvalidRawCertLength     = errors.New("Cert raw slice length is invalid")
 	ErrInvalidRawCertKeyLength  = errors.New("Cert Key raw slice length is invalid")
+	ErrUnknownPrivateKeyType    = errors.New("unknown private key type, only rsa and ec supported")
+	ErrInvalidRSAKey            = errors.New("type is not a *rsa.PrivateKey")
+	ErrInvalidECDSAKey          = errors.New("type is not a *ecdsa.PrivateKey")
 )
 
 var (
@@ -58,26 +65,27 @@ var (
 		tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
 		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+
+		// Added due to ECDSA elliptic.P384().
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 	}
 
 	buffpool = sync.Pool{New: func() interface{} { return new(bytes.Buffer) }}
 )
 
-// PersistenceStore defines an interface which exposes a single method
-// to persist a giving data into an underline store.
-// @mock
-type PersistenceStore interface {
-	Save(string, []byte) error
-	Get(string) ([]byte, error)
-}
+// PrivateKeyType defines the type of supported private key types.
+type PrivateKeyType int
 
-// CertificateAuthority defines a struct which contains a generated certificate template with
-// associated private and public keys.
-type CertificateAuthority struct {
-	PrivateKey  *rsa.PrivateKey
-	PublicKey   *rsa.PublicKey
-	Certificate *x509.Certificate
-}
+// private key type constants.
+const (
+	RSAKeyType PrivateKeyType = iota
+	ECDSAKeyType
+)
+
+//********************************************************************************************
+// SecondaryCertificateAuthority Implementation
+//********************************************************************************************
 
 // SecondaryCertificateAuthority defines a certificate authority which is not a CA and is signed
 // by a root CA.
@@ -109,49 +117,17 @@ func (sca SecondaryCertificateAuthority) CertificateRaw() ([]byte, error) {
 	}), nil
 }
 
-// Raw returns the whole Certificate Authority has a combined slice of bytes, with
-// total length and length of parts added at the beginning.
-// Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF ROOTCA KEY][2] [CERTIFICIATE][ROOTCA]
-// The above format then can be pulled and split properly to ensure matching data.
-func (sca SecondaryCertificateAuthority) Raw() ([]byte, error) {
-	rootCABuffer := buffpool.Get().(*bytes.Buffer)
-	defer buffpool.Put(rootCABuffer)
-	if err := pem.Encode(rootCABuffer, &pem.Block{
-		Type:  certTypeName,
-		Bytes: sca.RootCA.Raw,
-	}); err != nil {
-		return nil, err
-	}
+//********************************************************************************************
+// CertificateAuthority Implementation
+//********************************************************************************************
 
-	certBuffer := buffpool.Get().(*bytes.Buffer)
-	defer buffpool.Put(certBuffer)
-	if err := pem.Encode(certBuffer, &pem.Block{
-		Type:  certKeyName,
-		Bytes: sca.Certificate.Raw,
-	}); err != nil {
-		return nil, err
-	}
-
-	rootcertLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(rootcertLen, uint16(rootCABuffer.Len()))
-
-	certLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(certLen, uint16(certBuffer.Len()))
-
-	bitsLen := len(rootcertLen) + len(certLen)
-	contentLen := certBuffer.Len() + rootCABuffer.Len()
-
-	rawLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(rawLen, uint16(contentLen+bitsLen))
-
-	var raw bytes.Buffer
-	raw.Write(rawLen)
-	raw.Write(certLen)
-	raw.Write(rootcertLen)
-	certBuffer.WriteTo(&raw)
-	rootCABuffer.WriteTo(&raw)
-
-	return raw.Bytes(), nil
+// CertificateAuthority defines a struct which contains a generated certificate template with
+// associated private and public keys.
+type CertificateAuthority struct {
+	KeyType     PrivateKeyType
+	PrivateKey  interface{}
+	PublicKey   interface{}
+	Certificate *x509.Certificate
 }
 
 // VerifyCA validates provided Certificate is still valid with CeritifcateAuthority's CA
@@ -257,6 +233,8 @@ func (ca CertificateAuthority) ApproveClientCertificateSigningRequest(req *Certi
 	return req.ValidateAndAccept(secondaryCA, usage)
 }
 
+// initCertificateRequests initializes the certificate template needed for the request, generating
+// necessary certificate and attaching to request object.
 func (ca CertificateAuthority) initCertificateRequest(creq *CertificateRequest, lifeTime time.Duration, usages []x509.ExtKeyUsage) (*x509.Certificate, error) {
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
@@ -268,22 +246,22 @@ func (ca CertificateAuthority) initCertificateRequest(creq *CertificateRequest, 
 	req := creq.Request
 
 	var template x509.Certificate
-	template.SerialNumber = serialNumber
+	template.NotBefore = before
+	template.ExtKeyUsage = usages
+	template.Subject = req.Subject
+	template.DNSNames = req.DNSNames
 	template.Signature = req.Signature
 	template.PublicKey = req.PublicKey
+	template.Extensions = req.Extensions
+	template.SerialNumber = serialNumber
+	template.IPAddresses = req.IPAddresses
+	template.Issuer = ca.Certificate.Subject
+	template.NotAfter = before.Add(lifeTime)
+	template.EmailAddresses = req.EmailAddresses
+	template.ExtraExtensions = req.ExtraExtensions
+	template.KeyUsage = x509.KeyUsageDigitalSignature
 	template.SignatureAlgorithm = req.SignatureAlgorithm
 	template.PublicKeyAlgorithm = req.PublicKeyAlgorithm
-	template.Subject = req.Subject
-	template.Issuer = ca.Certificate.Subject
-	template.NotBefore = before
-	template.NotAfter = before.Add(lifeTime)
-	template.KeyUsage = x509.KeyUsageDigitalSignature
-	template.DNSNames = req.DNSNames
-	template.IPAddresses = req.IPAddresses
-	template.EmailAddresses = req.EmailAddresses
-	template.ExtKeyUsage = usages
-	template.Extensions = req.Extensions
-	template.ExtraExtensions = req.ExtraExtensions
 
 	return &template, nil
 }
@@ -293,10 +271,36 @@ func (ca CertificateAuthority) PrivateKeyRaw() ([]byte, error) {
 	if ca.PrivateKey == nil {
 		return nil, ErrNoPrivateKey
 	}
-	return pem.EncodeToMemory(&pem.Block{
-		Type:  certKeyName,
-		Bytes: x509.MarshalPKCS1PrivateKey(ca.PrivateKey),
-	}), nil
+
+	switch ca.KeyType {
+	case RSAKeyType:
+		pkey, ok := ca.PrivateKey.(*rsa.PrivateKey)
+		if !ok {
+			return nil, ErrInvalidRSAKey
+		}
+
+		return pem.EncodeToMemory(&pem.Block{
+			Type:  certKeyName,
+			Bytes: x509.MarshalPKCS1PrivateKey(pkey),
+		}), nil
+	case ECDSAKeyType:
+		pkey, ok := ca.PrivateKey.(*ecdsa.PrivateKey)
+		if !ok {
+			return nil, ErrInvalidECDSAKey
+		}
+
+		encoded, err := x509.MarshalECPrivateKey(pkey)
+		if !ok {
+			return nil, err
+		}
+
+		return pem.EncodeToMemory(&pem.Block{
+			Type:  certKeyName,
+			Bytes: encoded,
+		}), nil
+	}
+
+	return nil, ErrUnknownPrivateKeyType
 }
 
 // CertificateRaw returns the raw version of the certificate.
@@ -308,181 +312,6 @@ func (ca CertificateAuthority) CertificateRaw() ([]byte, error) {
 		Type:  certTypeName,
 		Bytes: ca.Certificate.Raw,
 	}), nil
-}
-
-// Raw returns the whole Certificate Authority has a combined slice of bytes, with
-// total length and length of parts added at the beginning.
-// Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF PRIVATE KEY][2] [CERTIFICIATE][PRIVIATEKEY]
-// The above format then can be pulled and split properly to ensure matching data.
-func (ca CertificateAuthority) Raw() ([]byte, error) {
-	certBuffer := buffpool.Get().(*bytes.Buffer)
-	defer buffpool.Put(certBuffer)
-	if err := pem.Encode(certBuffer, &pem.Block{
-		Type:  certTypeName,
-		Bytes: ca.Certificate.Raw,
-	}); err != nil {
-		return nil, err
-	}
-
-	keyBuffer := buffpool.Get().(*bytes.Buffer)
-	defer buffpool.Put(keyBuffer)
-	if err := pem.Encode(keyBuffer, &pem.Block{
-		Type:  certKeyName,
-		Bytes: x509.MarshalPKCS1PrivateKey(ca.PrivateKey),
-	}); err != nil {
-		return nil, err
-	}
-
-	certLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(certLen, uint16(certBuffer.Len()))
-
-	keyLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(keyLen, uint16(keyBuffer.Len()))
-
-	bitsLen := len(keyLen) + len(certLen)
-	contentLen := certBuffer.Len() + keyBuffer.Len()
-
-	rawLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(rawLen, uint16(contentLen+bitsLen))
-
-	var raw bytes.Buffer
-	raw.Write(rawLen)
-	raw.Write(certLen)
-	raw.Write(keyLen)
-	certBuffer.WriteTo(&raw)
-	keyBuffer.WriteTo(&raw)
-
-	return raw.Bytes(), nil
-}
-
-// FromRaw decodes the whole raw data into Certificate Authority, using the format below
-// Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF PRIVATE KEY][2] [CERTIFICIATE][PRIVIATEKEY]
-// The above format then can be pulled and split properly to ensure matching data.
-func (ca *CertificateAuthority) FromRaw(raw []byte) error {
-	if len(raw) == 0 {
-		return ErrEmptyCARawSlice
-	}
-
-	if len(raw) <= 7 {
-		return ErrInvalidRawLength
-	}
-
-	rawLenBytes := raw[0:2]
-	certLenBytes := raw[2:4]
-	keyLenBytes := raw[4:6]
-	rest := raw[6:]
-
-	rawLen := int(binary.LittleEndian.Uint16(rawLenBytes))
-	if len(raw[2:]) != rawLen {
-		return ErrInvalidRawLength
-	}
-
-	keyLen := int(binary.LittleEndian.Uint16(keyLenBytes))
-	certLen := int(binary.LittleEndian.Uint16(certLenBytes))
-
-	certKeyInfoLen := len(certLenBytes) + len(keyLenBytes)
-	realRawLen := rawLen - certKeyInfoLen
-
-	if (realRawLen - keyLen) != certLen {
-		return ErrInvalidRawCertLength
-	}
-
-	if (realRawLen - certLen) != keyLen {
-		return ErrInvalidRawCertKeyLength
-	}
-
-	certRaw := rest[:certLen]
-	if len(certRaw) != certLen {
-		return ErrInvalidRawCertLength
-	}
-
-	keyRaw := rest[certLen:]
-	if len(keyRaw) != keyLen {
-		return ErrInvalidRawCertKeyLength
-	}
-
-	certblock, _ := pem.Decode(certRaw)
-	if certblock == nil {
-		return ErrInvalidPemBlock
-	}
-
-	if certblock.Type != certTypeName {
-		return ErrInvalidCABlockType
-	}
-
-	certificate, err := x509.ParseCertificate(certblock.Bytes)
-	if err != nil {
-		return err
-	}
-
-	ca.Certificate = certificate
-
-	certkeyblock, _ := pem.Decode(keyRaw)
-	if certkeyblock == nil {
-		return ErrInvalidPemBlock
-	}
-
-	if certkeyblock.Type != certKeyName {
-		return ErrInvalidCAKeyBlockType
-	}
-
-	privateKey, err := x509.ParsePKCS1PrivateKey(certkeyblock.Bytes)
-	if err != nil {
-		return err
-	}
-
-	ca.PrivateKey = privateKey
-	ca.PublicKey = &privateKey.PublicKey
-
-	return nil
-}
-
-// Load loads certificate and key from provided PersistenceStore.
-func (ca *CertificateAuthority) Load(store PersistenceStore) error {
-	cert, err := store.Get(certFileName)
-	if err != nil {
-		return err
-	}
-
-	certificate, err := decodePEMCertificate(cert, certTypeName)
-	if err != nil {
-		return err
-	}
-
-	ca.Certificate = certificate
-
-	certKey, err := store.Get(certKeyFileName)
-	if err != nil {
-		return err
-	}
-
-	privateKey, err := decodePEMPrivateKey(certKey)
-	if err != nil {
-		return err
-	}
-
-	ca.PrivateKey = privateKey
-	ca.PublicKey = &privateKey.PublicKey
-	return nil
-}
-
-// Persist persist giving certificate into underline store.
-func (ca CertificateAuthority) Persist(store PersistenceStore) error {
-	certBytes, err := ca.CertificateRaw()
-	if err != nil {
-		return err
-	}
-
-	keyBytes, err := ca.PrivateKeyRaw()
-	if err != nil {
-		return err
-	}
-
-	if err := store.Save(certFileName, certBytes); err != nil {
-		return err
-	}
-
-	return store.Save(certKeyFileName, keyBytes)
 }
 
 // TLSCertPool returns a new CertPool which contains the certificate for the CA which can
@@ -534,6 +363,11 @@ type CertificateAuthorityProfile struct {
 	Postal       string `json:"postal"`
 	CommonName   string `json:"common_name"`
 
+	// PrivateKeyType defines the expected private key to
+	// be used to create the ca key. See private key type
+	// constants.
+	PrivateKeyType PrivateKeyType
+
 	// Public and Private key configuration fields.
 	Version     int
 	KeyStrength int
@@ -570,17 +404,31 @@ func CreateCertificateAuthority(cas CertificateAuthorityProfile) (CertificateAut
 		return ca, err
 	}
 
-	privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
-	if err != nil {
-		return ca, err
+	switch cas.PrivateKeyType {
+	case RSAKeyType:
+		privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
+		if err != nil {
+			return ca, err
+		}
+
+		ca.PrivateKey = privateKey
+		ca.PublicKey = &privateKey.PublicKey
+	case ECDSAKeyType:
+		privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		if err != nil {
+			return ca, err
+		}
+
+		ca.PrivateKey = privateKey
+		ca.PublicKey = privateKey.PublicKey
+	default:
+		return ca, ErrUnknownPrivateKeyType
 	}
 
+	ca.KeyType = cas.PrivateKeyType
 	if cas.SignatureAlgorithm <= 0 {
 		cas.SignatureAlgorithm = x509.SHA256WithRSA
 	}
-
-	ca.PrivateKey = privateKey
-	ca.PublicKey = &privateKey.PublicKey
 
 	var ips []net.IP
 
@@ -635,6 +483,10 @@ func CreateCertificateAuthority(cas CertificateAuthorityProfile) (CertificateAut
 	return ca, nil
 }
 
+//********************************************************************************************
+// CertificateReuqestProfile Implementation
+//********************************************************************************************
+
 // CertificateRequestProfile generates a certificate request with associated private key
 // and public key, which can be sent over the wire or directly to a CeritificateAuthority
 // for signing.
@@ -646,6 +498,11 @@ type CertificateRequestProfile struct {
 	Address      string `json:"address"`
 	Postal       string `json:"postal"`
 	CommonName   string `json:"common_name"`
+
+	// PrivateKeyType defines the expected private key to
+	// be used to create the ca key. See private key type
+	// constants.
+	PrivateKeyType PrivateKeyType
 
 	// SignatureAlgorithm for creating certificates with.
 	SignatureAlgorithm x509.SignatureAlgorithm
@@ -674,17 +531,31 @@ type CertificateRequestProfile struct {
 func CreateCertificateRequest(cas CertificateRequestProfile) (CertificateRequest, error) {
 	var ca CertificateRequest
 
-	privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
-	if err != nil {
-		return ca, err
+	switch cas.PrivateKeyType {
+	case RSAKeyType:
+		privateKey, err := rsa.GenerateKey(rand.Reader, cas.KeyStrength)
+		if err != nil {
+			return ca, err
+		}
+
+		ca.PrivateKey = privateKey
+		ca.PublicKey = &privateKey.PublicKey
+	case ECDSAKeyType:
+		privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+		if err != nil {
+			return ca, err
+		}
+
+		ca.PrivateKey = privateKey
+		ca.PublicKey = privateKey.PublicKey
+	default:
+		return ca, ErrUnknownPrivateKeyType
 	}
 
+	ca.KeyType = cas.PrivateKeyType
 	if cas.SignatureAlgorithm <= 0 {
 		cas.SignatureAlgorithm = x509.SHA256WithRSA
 	}
-
-	ca.PrivateKey = privateKey
-	ca.PublicKey = &privateKey.PublicKey
 
 	var ips []net.IP
 
@@ -727,8 +598,9 @@ func CreateCertificateRequest(cas CertificateRequestProfile) (CertificateRequest
 // CertificateRequest defines a struct which contains a generated certificate request template with
 // associated private and public keys.
 type CertificateRequest struct {
-	PrivateKey  *rsa.PrivateKey
-	PublicKey   *rsa.PublicKey
+	KeyType     PrivateKeyType
+	PrivateKey  interface{}
+	PublicKey   interface{}
 	Request     *x509.CertificateRequest
 	SecondaryCA SecondaryCertificateAuthority
 }
@@ -738,7 +610,11 @@ func (ca CertificateRequest) RequestRaw() ([]byte, error) {
 	if ca.Request == nil {
 		return nil, ErrNoCertificateRequest
 	}
-	return ca.Request.Raw, nil
+
+	return pem.EncodeToMemory(&pem.Block{
+		Type:  certReqTypeName,
+		Bytes: ca.Request.Raw,
+	}), nil
 }
 
 // PrivateKeyRaw returns the raw version of the certificate's private key.
@@ -746,80 +622,36 @@ func (ca CertificateRequest) PrivateKeyRaw() ([]byte, error) {
 	if ca.PrivateKey == nil {
 		return nil, ErrNoPrivateKey
 	}
-	return pem.EncodeToMemory(&pem.Block{
-		Type:  certKeyName,
-		Bytes: x509.MarshalPKCS1PrivateKey(ca.PrivateKey),
-	}), nil
-}
 
-// Load loads certificate and key from provided PersistenceStore.
-func (ca *CertificateRequest) Load(store PersistenceStore) error {
-	cert, err := store.Get(reqcertFileName)
-	if err != nil {
-		return err
+	switch ca.KeyType {
+	case RSAKeyType:
+		pkey, ok := ca.PrivateKey.(*rsa.PrivateKey)
+		if !ok {
+			return nil, ErrInvalidRSAKey
+		}
+
+		return pem.EncodeToMemory(&pem.Block{
+			Type:  certKeyName,
+			Bytes: x509.MarshalPKCS1PrivateKey(pkey),
+		}), nil
+	case ECDSAKeyType:
+		pkey, ok := ca.PrivateKey.(*ecdsa.PrivateKey)
+		if !ok {
+			return nil, ErrInvalidECDSAKey
+		}
+
+		encoded, err := x509.MarshalECPrivateKey(pkey)
+		if !ok {
+			return nil, err
+		}
+
+		return pem.EncodeToMemory(&pem.Block{
+			Type:  certKeyName,
+			Bytes: encoded,
+		}), nil
 	}
 
-	certificate, err := decodePEMCertificate(cert, certTypeName)
-	if err != nil {
-		return err
-	}
-
-	ca.SecondaryCA.Certificate = certificate
-
-	certKey, err := store.Get(reqcertKeyFileName)
-	if err != nil {
-		return err
-	}
-
-	privateKey, err := decodePEMPrivateKey(certKey)
-	if err != nil {
-		return err
-	}
-
-	ca.PrivateKey = privateKey
-	ca.PublicKey = &privateKey.PublicKey
-
-	rootCACert, err := store.Get(reqcertRootCAFileName)
-	if err != nil {
-		return err
-	}
-
-	rootCertificate, err := decodePEMCertificate(rootCACert, certTypeName)
-	if err != nil {
-		return err
-	}
-
-	ca.SecondaryCA.RootCA = rootCertificate
-
-	return nil
-}
-
-// Persist persist giving certificate into underline store.
-func (ca CertificateRequest) Persist(store PersistenceStore) error {
-	certBytes, err := ca.SecondaryCA.CertificateRaw()
-	if err != nil {
-		return err
-	}
-
-	rootCABytes, err := ca.SecondaryCA.RootCertificateRaw()
-	if err != nil {
-		return err
-	}
-
-	keyBytes, err := ca.PrivateKeyRaw()
-	if err != nil {
-		return err
-	}
-
-	if err := store.Save(reqcertFileName, certBytes); err != nil {
-		return err
-	}
-
-	if err := store.Save(reqcertRootCAFileName, rootCABytes); err != nil {
-		return err
-	}
-
-	return store.Save(reqcertKeyFileName, keyBytes)
+	return nil, ErrUnknownPrivateKeyType
 }
 
 // IsValid validates that Certificate is still valid with rootCA with accordance to usage.
@@ -961,128 +793,4 @@ func (ca *CertificateRequest) TLSCert() (tls.Certificate, error) {
 	}
 
 	return tlsCert, nil
-}
-
-// Raw returns the whole Certificate Authority has a combined slice of bytes, with
-// total length and length of parts added at the beginning.
-// Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE REQUEST][2]
-// [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF ROOTCA KEY][2] [CERTIFICIATE][ROOTCA]
-// The above format then can be pulled and split properly to ensure matching data.
-// WARNING: The private key is not included within the raw bytes.
-func (ca CertificateRequest) Raw() ([]byte, error) {
-	rootCA, err := ca.SecondaryCA.RootCertificateRaw()
-	if err != nil {
-		return nil, err
-	}
-
-	rootcertLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(rootcertLen, uint16(len(rootCA)))
-
-	car, err := ca.SecondaryCA.CertificateRaw()
-	if err != nil {
-		return nil, err
-	}
-
-	certLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(certLen, uint16(len(car)))
-
-	rq, err := ca.RequestRaw()
-	if err != nil {
-		return nil, err
-	}
-
-	reqLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(reqLen, uint16(len(rq)))
-
-	bitsLen := len(rootcertLen) + len(certLen) + len(reqLen)
-	contentLen := len(car) + len(rootCA) + len(rq)
-
-	rawLen := make([]byte, 2)
-	binary.LittleEndian.PutUint16(rawLen, uint16(contentLen+bitsLen))
-
-	var raw bytes.Buffer
-	raw.Write(rawLen)
-	raw.Write(reqLen)
-	raw.Write(certLen)
-	raw.Write(rootcertLen)
-	raw.Write(rq)
-	raw.Write(car)
-	raw.Write(rootCA)
-
-	return raw.Bytes(), nil
-}
-
-// FromRaw decodes the whole raw data into Certificate Authority, using the format below
-// Format: [LENGTH OF ALL DATA][2] [LENGTH OF CERTIFICATE REQUEST][2] [LENGTH OF CERTIFICATE RAW][2] [LENGTH OF ROOTCA KEY][2] [CERTIFICIATE][ROOTCA]
-// The above format then can be pulled and split properly to ensure matching data.
-// WARNING: The private key is not included within the raw bytes.
-func (ca *CertificateRequest) FromRaw(raw []byte) error {
-	if len(raw) == 0 {
-		return ErrEmptyCARawSlice
-	}
-
-	if len(raw) <= 8 {
-		return ErrInvalidRawLength
-	}
-
-	rawLenBytes := raw[0:2]
-	reqLenBytes := raw[2:4]
-	certLenBytes := raw[4:6]
-	rootCertLenBytes := raw[6:8]
-	rawData := raw[8:]
-
-	rawLen := int(binary.LittleEndian.Uint16(rawLenBytes))
-	if len(raw[2:]) != rawLen {
-		return ErrInvalidRawLength
-	}
-
-	reqLen := int(binary.LittleEndian.Uint16(reqLenBytes))
-	certLen := int(binary.LittleEndian.Uint16(certLenBytes))
-	rootCertLen := int(binary.LittleEndian.Uint16(rootCertLenBytes))
-
-	certKeyInfoLen := len(certLenBytes) + len(reqLenBytes) + len(rootCertLenBytes)
-	realRawLen := rawLen - certKeyInfoLen
-
-	if (realRawLen - reqLen) != (rootCertLen + certLen) {
-		return ErrInvalidRawLength
-	}
-
-	req := rawData[:reqLen]
-	if len(req) != reqLen {
-		return ErrInvalidRequestRawLength
-	}
-
-	certLenTotal := certLen + reqLen
-	cert := rawData[reqLen:certLenTotal]
-	if len(cert) != certLen {
-		return ErrInvalidRawCertLength
-	}
-
-	// rootCertLenTotal := certLen + rootCertLen
-	rootCert := rawData[certLenTotal:]
-	if len(rootCert) != rootCertLen {
-		return ErrInvalidRootCARawLength
-	}
-
-	certificateRequest, err := x509.ParseCertificateRequest(req)
-	if err != nil {
-		return err
-	}
-
-	ca.Request = certificateRequest
-
-	certificate, err := decodePEMCertificate(cert, certTypeName)
-	if err != nil {
-		return err
-	}
-
-	ca.SecondaryCA.Certificate = certificate
-
-	rootCA, err := decodePEMCertificate(rootCert, certTypeName)
-	if err != nil {
-		return err
-	}
-
-	ca.SecondaryCA.RootCA = rootCA
-	return nil
 }

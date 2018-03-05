@@ -171,8 +171,7 @@ func makeMessage(msg []byte) []byte {
 }
 
 func createTLSCA() (ca certificates.CertificateAuthority, server, client certificates.CertificateRequest, err error) {
-	serials := certificates.SerialService{Length: 128}
-	profile := certificates.CertificateProfile{
+	service := certificates.CertificateAuthorityProfile{
 		CommonName:   "*",
 		Local:        "Lagos",
 		Organization: "DreamBench",
@@ -180,30 +179,26 @@ func createTLSCA() (ca certificates.CertificateAuthority, server, client certifi
 		Province:     "South-West",
 	}
 
-	var service certificates.CertificateAuthorityService
 	service.KeyStrength = 4096
 	service.LifeTime = (time.Hour * 8760)
-	service.Profile = profile
-	service.Serials = serials
 	service.Emails = append([]string{}, "alex.ewetumo@dreambench.io")
 
-	var requestService certificates.CertificateRequestService
-	requestService.Profile = profile
+	var requestService certificates.CertificateRequestProfile
 	requestService.KeyStrength = 2048
 
-	ca, err = service.New()
+	ca, err = certificates.CreateCertificateAuthority(service)
 	if err != nil {
 		return
 	}
 
-	if server, err = requestService.New(); err == nil {
-		if err = ca.ApproveServerCertificateSigningRequest(&server, serials, time.Hour*8760); err != nil {
+	if server, err = certificates.CreateCertificateRequest(requestService); err == nil {
+		if err = ca.ApproveServerCertificateSigningRequest(&server, time.Hour*8760); err != nil {
 			return
 		}
 	}
 
-	if client, err = requestService.New(); err == nil {
-		if err = ca.ApproveClientCertificateSigningRequest(&client, serials, time.Hour*8760); err != nil {
+	if client, err = certificates.CreateCertificateRequest(requestService); err == nil {
+		if err = ca.ApproveClientCertificateSigningRequest(&client, time.Hour*8760); err != nil {
 			return
 		}
 	}

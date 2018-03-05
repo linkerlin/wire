@@ -1,21 +1,15 @@
 package certificates_test
 
 import (
-	"bytes"
 	"crypto/x509"
 	"testing"
 	"time"
 
 	"github.com/influx6/faux/tests"
 	"github.com/wirekit/wire/certificates"
-	"github.com/wirekit/wire/mocks"
 )
 
 func TestCertificateRequestService(t *testing.T) {
-	storeMap := make(map[string][]byte)
-	var store mocks.PersistenceStoreMock
-	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
-
 	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
@@ -62,10 +56,6 @@ func TestCertificateRequestService(t *testing.T) {
 }
 
 func TestCertificateRequestServiceForClient(t *testing.T) {
-	storeMap := make(map[string][]byte)
-	var store mocks.PersistenceStoreMock
-	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
-
 	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
@@ -122,10 +112,6 @@ func TestCertificateRequestServiceForClient(t *testing.T) {
 }
 
 func TestCertificateRequestServiceForServer(t *testing.T) {
-	storeMap := make(map[string][]byte)
-	var store mocks.PersistenceStoreMock
-	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
-
 	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
@@ -181,11 +167,7 @@ func TestCertificateRequestServiceForServer(t *testing.T) {
 	tests.Passed("Should have successfully created root tls.Config")
 }
 
-func TestCertificateRequestRawLoading(t *testing.T) {
-	storeMap := make(map[string][]byte)
-	var store mocks.PersistenceStoreMock
-	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
-
+func TestCertificateRequestServiceForClientWithVerify(t *testing.T) {
 	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
@@ -245,29 +227,13 @@ func TestCertificateRequestRawLoading(t *testing.T) {
 	}
 	tests.Passed("Should have successfully created root tls.Config")
 
-	raw, err := reqCA.Raw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have generated raw version of CertificateRequest")
-	}
-	tests.Passed("Should have generated raw version of CertificateRequest")
-
-	var rca certificates.CertificateRequest
-	if err := rca.FromRaw(raw); err != nil {
-		tests.FailedWithError(err, "Should have read raw of CertificateRequest")
-	}
-	tests.Passed("Should have read raw  of CertificateRequest")
-
 }
 
-func TestCertificateService(t *testing.T) {
-	storeMap := make(map[string][]byte)
-	var store mocks.PersistenceStoreMock
-	store.GetFunc, store.PersistFunc = mocks.MapStore(storeMap)
-
+func TestCreateCACertificate(t *testing.T) {
 	service := certificates.CertificateAuthorityProfile{
 		Local:        "Lagos",
 		Organization: "DreamBench",
-		CommonName:   "DreamBench Inc",
+		CommonName:   "*.dreambench.io",
 		Country:      "Nigeria",
 		Province:     "South-West",
 	}
@@ -282,82 +248,8 @@ func TestCertificateService(t *testing.T) {
 	}
 	tests.Passed("Should have generated new CertificateAuthority")
 
-	if err := ca.Persist(store); err != nil {
-		tests.FailedWithError(err, "Should have successfully store certificate into persistence store")
+	if !ca.Certificate.IsCA {
+		tests.Failed("Certificate should be a CA")
 	}
-	tests.Passed("Should have successfully store certificate into persistence store")
-
-	var restoredCA certificates.CertificateAuthority
-	if err := restoredCA.Load(store); err != nil {
-		tests.FailedWithError(err, "Should have successfully retrieved certificate from store")
-	}
-	tests.Passed("Should have successfully retrieved certificate from store")
-
-	caRaw, err := ca.CertificateRaw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have been able to retrieve raw form of certificate")
-	}
-	tests.Passed("Should have been able to retrieve raw form of certificate")
-
-	rcaRaw, err := restoredCA.CertificateRaw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have been able to retrieve raw form of certificate")
-	}
-	tests.Passed("Should have been able to retrieve raw form of certificate")
-
-	if !bytes.Equal(caRaw, rcaRaw) {
-		tests.Failed("Should have matching certificate raw data between real and restored versions")
-	}
-	tests.Passed("Should have matching certificate raw data between real and restored versions")
-
-	caKeyRaw, err := ca.PrivateKeyRaw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have been able to retrieve raw form of certificate")
-	}
-	tests.Passed("Should have been able to retrieve raw form of certificate")
-
-	rcaKeyRaw, err := restoredCA.PrivateKeyRaw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have been able to retrieve raw form of certificate")
-	}
-	tests.Passed("Should have been able to retrieve raw form of certificate")
-
-	if !bytes.Equal(caKeyRaw, rcaKeyRaw) {
-		tests.Failed("Should have matching certificate private key raw data between real and restored versions")
-	}
-	tests.Passed("Should have matching certificate private key raw data between real and restored versions")
-
-	caConRaw, err := ca.Raw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have being able to generate raw bytes of CertificateAuthority")
-	}
-	tests.Passed("Should have being able to generate raw bytes of CertificateAuthority")
-
-	var newCA certificates.CertificateAuthority
-	if err := newCA.FromRaw(caConRaw); err != nil {
-		tests.FailedWithError(err, "Should have being able to load raw version of CertificateAuthority")
-	}
-	tests.Passed("Should have being able to load raw version of CertificateAuthority")
-
-	rcaRaw, err = newCA.CertificateRaw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have been able to retrieve raw form of certificate")
-	}
-	tests.Passed("Should have been able to retrieve raw form of certificate")
-
-	if !bytes.Equal(caRaw, rcaRaw) {
-		tests.Failed("Should have matching certificate raw data between real and restored versions")
-	}
-	tests.Passed("Should have matching certificate raw data between real and restored versions")
-
-	rcaKeyRaw, err = newCA.PrivateKeyRaw()
-	if err != nil {
-		tests.FailedWithError(err, "Should have been able to retrieve raw form of certificate")
-	}
-	tests.Passed("Should have been able to retrieve raw form of certificate")
-
-	if !bytes.Equal(caKeyRaw, rcaKeyRaw) {
-		tests.Failed("Should have matching certificate private key raw data between real and restored versions")
-	}
-	tests.Passed("Should have matching certificate private key raw data between real and restored versions")
+	tests.Passed("Certificate should be a CA")
 }
