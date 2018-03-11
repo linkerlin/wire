@@ -1,8 +1,8 @@
 Wire
 ------
 [![Go Report Card](https://goreportcard.com/badge/github.com/wirekit/wire)](https://goreportcard.com/report/github.com/wirekit/wire)
-[![Travis CI](https://travis-ci.org/influx6/wire.svg?master=branch)](https://travis-ci.org/influx6/wire)
-[![Circle CI](https://circleci.com/gh/influx6/wire.svg?style=svg)](https://circleci.com/gh/influx6/wire)
+[![Travis CI](https://travis-ci.org/wirekit/wire.svg?master=branch)](https://travis-ci.org/wirekit/wire)
+[![Circle CI](https://circleci.com/gh/wirekit/wire.svg?style=svg)](https://circleci.com/gh/wirekit/wire)
 
 Wire provides a tcp+websocket packages with blazing fast write speeds. It is a foundation upon which larger and more complex network applications can be built on.
 
@@ -38,3 +38,5 @@ Msocks like all Wire packages are a foundation, in that they lay the necessary f
 
 Do reach out anytime, if PR takes time for review. :)
 
+## Vendoring
+Vendoring was done with [Govendor](https://github.com/kardianos/govendor).
