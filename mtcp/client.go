@@ -131,6 +131,7 @@ func Connect(addr string, ops ...ConnectOptions) (wire.Client, error) {
 	c.WriteFunc = network.write
 	c.CloseFunc = network.close
 	c.BufferedFunc = network.buffered
+	c.BroadCastFunc = network.broadcast
 	c.HasPendingFunc = network.hasPending
 	c.LocalAddrFunc = network.getLocalAddr
 	c.RemoteAddrFunc = network.getRemoteAddr
@@ -403,6 +404,17 @@ func (cn *clientNetwork) flush() error {
 	return nil
 }
 
+func (cn *clientNetwork) broadcast(inSize int) (io.WriteCloser, error) {
+	writer, err := cn.write(inSize + len(wire.BROADCAST))
+	if err != nil {
+		return nil, err
+	}
+
+	// write the broadcast header.
+	writer.Write(broadcastBytes)
+	return writer, nil
+}
+
 func (cn *clientNetwork) write(inSize int) (io.WriteCloser, error) {
 	if err := cn.isLive(); err != nil {
 		return nil, err
@@ -469,6 +481,11 @@ func (cn *clientNetwork) read() ([]byte, error) {
 	atomic.AddInt64(&cn.totalRead, int64(len(indata)))
 	if err != nil {
 		return nil, err
+	}
+
+	// if its a broadcast, just trim the header out.
+	if bytes.HasPrefix(indata, broadcastBytes) {
+		return bytes.TrimPrefix(indata, broadcastBytes), nil
 	}
 
 	if bytes.HasPrefix(indata, cinfoBytes) {

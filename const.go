@@ -70,28 +70,31 @@ const (
 	// MaxHeaderSize defines size of max header for message header length.
 	MaxHeaderSize = uint32(4294967295)
 
+	// BROADCAST defines a action key for broadcasting data to network connections.
+	BROADCAST = "MN:BRCAST "
+
 	// CINFO defines a action key for requesting connection info.
-	CINFO = "MNET:CINFO"
+	CINFO = "MN:CINFO"
 
 	// CRESCUE defines a action key for sending rescue status to server if client
 	// fails to receive expected response in set limits.
-	CRESCUE = "MNET:NORCV:RESC"
+	CRESCUE = "MN:NORCV:RESC"
 
 	// RINFO defines a action key for responding to a CINFO request.
-	RINFO = "MNET:RINFO "
+	RINFO = "MN:RINFO "
 
 	// CLSTATUS defines a action key for responding with cluster status info.
-	CLSTATUS = "MNET:CLSTATUS "
-	
+	CLSTATUS = "MN:CLST "
+
 	// CLHandshakeSkip defines action sent by client which is a non-cluster node
 	// and wishes to skip handshake process. This should be sent by client libraries
 	// that wish to
-	CLHandshakeSkip = "MNET:HS:SP "
+	CLHandshakeSkip = "MN:HS:SP "
 
 	// ClientHandshakeCompleted defines a action key for responding with a handshake completed
 	// to a client connection.
-	ClientHandShakeCompleted = "MNET:Handshake:CL:CMT"
+	ClientHandShakeCompleted = "MN:HS:CL:CMT"
 
 	// CLHandshake defines a action key for responding with a handshake completed.
-	CLHANDSHAKECOMPLETED = "MNET:Handshake:CMT"
+	CLHANDSHAKECOMPLETED = "MN:HS:CMT"
 )

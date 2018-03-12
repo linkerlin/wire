@@ -34,6 +34,7 @@ var (
 	handshakeCompletedBytes       = []byte(wire.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(wire.ClientHandShakeCompleted)
 	handshakeSkipBytes            = []byte(wire.CLHandshakeSkip)
+	broadcastBytes                = []byte(wire.BROADCAST)
 )
 
 //************************************************************************
@@ -177,6 +178,23 @@ func (nc *tcpServerClient) read() ([]byte, error) {
 	}
 
 	atomic.AddInt64(&nc.totalRead, int64(len(indata)))
+
+	// We are on the server, if we are not a cluster connection
+	// then return to reader else distribute to our own non-cluster
+	// connections.
+	if bytes.HasPrefix(indata, broadcastBytes) {
+		if !nc.isCluster() {
+			// Send to all network clients including clusters.
+			nc.distribute(true, false, true, indata)
+
+			return bytes.TrimPrefix(indata, broadcastBytes), nil
+		}
+
+		// Send to all network clients excluding clusters.
+		nc.distribute(true, true, true, indata)
+
+		return nil, wire.ErrNoDataYet
+	}
 
 	if bytes.HasPrefix(indata, clientHandshakeCompletedBytes) {
 		return nil, wire.ErrNoDataYet
@@ -478,6 +496,155 @@ func (nc *tcpServerClient) handshake() error {
 	}
 
 	nc.logs.Info("handshake completed")
+	return nil
+}
+
+func (nc *tcpServerClient) broadcast(size int) (io.WriteCloser, error) {
+	if err := nc.isLive(); err != nil {
+		return nil, err
+	}
+
+	nc.mu.Lock()
+	if nc.conn == nil {
+		nc.mu.Unlock()
+		return nil, wire.ErrAlreadyClosed
+	}
+	nc.mu.Unlock()
+
+	size += len(broadcastBytes)
+
+	w := llio.NewActionLengthWriter(func(size []byte, data []byte) error {
+		atomic.AddInt64(&nc.totalReadMsgs, 1)
+		atomic.AddInt64(&nc.totalWritten, int64(len(data)))
+
+		nc.network.cu.Lock()
+		defer nc.network.cu.Unlock()
+
+		for _, client := range nc.network.clients {
+			if err := client.writeDirectly(size, data); err != nil {
+				nc.logs.WithFields(history.Attrs{
+					"from-client": nc.id,
+					"to-client":   client.id,
+					"data":        string(data),
+					"size-data":   string(size),
+				}).Error(err, "failed to broadcast data")
+			}
+		}
+
+		return nil
+	}, wire.HeaderLength, size)
+
+	// Write broadcast header to the writer.
+	w.Write(broadcastBytes)
+
+	return w, nil
+}
+
+func (nc *tcpServerClient) writeDirectly(d ...[]byte) error {
+	if len(d) == 0 {
+		return nil
+	}
+
+	if err := nc.isLive(); err != nil {
+		return err
+	}
+
+	var conn net.Conn
+	nc.mu.Lock()
+	if nc.conn == nil {
+		nc.mu.Unlock()
+		return wire.ErrAlreadyClosed
+	}
+	conn = nc.conn
+	nc.mu.Unlock()
+
+	nc.bu.Lock()
+	defer nc.bu.Unlock()
+
+	if nc.buffWriter == nil {
+		return wire.ErrAlreadyClosed
+	}
+
+	for _, item := range d {
+		buffered := nc.buffWriter.Buffered()
+		atomic.AddInt64(&nc.totalFlushOut, int64(buffered))
+
+		// size of next write.
+		toWrite := buffered + len(item)
+
+		// add size header
+		toWrite += wire.HeaderLength
+
+		if toWrite >= nc.maxWrite {
+			conn.SetWriteDeadline(time.Now().Add(wire.MaxFlushDeadline))
+			if err := nc.buffWriter.Flush(); err != nil {
+				conn.SetWriteDeadline(time.Time{})
+				return err
+			}
+			conn.SetWriteDeadline(time.Time{})
+		}
+
+		if _, err := nc.buffWriter.Write(item); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (nc *tcpServerClient) distribute(skipSelf bool, skipCluster bool, flush bool, data []byte) error {
+	nc.network.cu.Lock()
+	defer nc.network.cu.Unlock()
+
+	for _, client := range nc.network.clients {
+		// If skipself is true, then skip this instance from
+		// write.
+		if skipSelf && (client.id == nc.id || client == nc) {
+			continue
+		}
+
+		// If skipCluster is true and we are a cluster, then skip this
+		// instance from write. We do this because attempting to wire
+		// to all cluster here, will calls a endless propagation, has
+		// other clusters will be sending back to the source. Its important
+		// to only ever ensure if a cluster is sent to then it's done by the
+		// source of the message, allowing other clusters to just distribute
+		// to their internal network client connections.
+		if skipCluster && client.isCluster() {
+			continue
+		}
+
+		if w, err := client.write(len(data)); err == nil {
+			if _, err := w.Write(data); err != nil {
+				nc.logs.WithFields(history.Attrs{
+					"from-client": nc.id,
+					"to-client":   client.id,
+					"data":        string(data),
+				}).Error(err, "failed to broadcast data")
+			}
+
+			if err := w.Close(); err != nil {
+				nc.logs.WithFields(history.Attrs{
+					"from-client": nc.id,
+					"to-client":   client.id,
+					"data":        string(data),
+				}).Error(err, "failed to close broadcast data writer")
+			}
+
+			// If flush is set, then flush all existing data
+			// into connection.
+			if flush {
+				if err := client.flush(); err != nil {
+					nc.logs.WithFields(history.Attrs{
+						"from-client": nc.id,
+						"to-client":   client.id,
+						"data":        string(data),
+					}).Error(err, "failed to flush broadcasted data")
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -829,6 +996,7 @@ func (n *TCPNetwork) getOtherClients(cid string) ([]wire.Client, error) {
 		client.WriteFunc = conn.write
 		client.InfoFunc = conn.getInfo
 		client.BufferedFunc = conn.buffered
+		client.BroadCastFunc = conn.broadcast
 		client.IsClusterFunc = conn.isCluster
 		client.HasPendingFunc = conn.hasPending
 		client.StatisticFunc = conn.getStatistics
@@ -964,6 +1132,7 @@ func (n *TCPNetwork) addClient(conn net.Conn, policy wire.RetryPolicy, isCluster
 	client.CloseFunc = nc.closeConn
 	client.BufferedFunc = nc.buffered
 	client.IsClusterFunc = nc.isCluster
+	client.BroadCastFunc = nc.broadcast
 	client.HasPendingFunc = nc.hasPending
 	client.LocalAddrFunc = nc.getLocalAddr
 	client.StatisticFunc = nc.getStatistics

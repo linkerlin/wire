@@ -143,6 +143,7 @@ func Connect(addr string, ops ...ConnectOptions) (wire.Client, error) {
 	c.LiveFunc = network.isAlive
 	c.InfoFunc = network.getInfo
 	c.ReaderFunc = network.clientRead
+	c.BroadCastFunc = network.broadcast
 	c.HasPendingFunc = network.hasPending
 	c.StatisticFunc = network.getStatistics
 	c.LocalAddrFunc = network.getLocalAddr
@@ -196,6 +197,17 @@ func (cn *socketClient) sendRescue() error {
 	wc.Write(rescueBytes)
 	wc.Close()
 	return cn.flush()
+}
+
+func (cn *socketClient) broadcast(inSize int) (io.WriteCloser, error) {
+	writer, err := cn.write(inSize + len(broadcastBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	// write the broadcast header.
+	writer.Write(broadcastBytes)
+	return writer, nil
 }
 
 func (cn *socketClient) handleCINFO() error {

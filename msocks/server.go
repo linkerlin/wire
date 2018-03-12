@@ -34,6 +34,7 @@ var (
 	handshakeCompletedBytes       = []byte(wire.CLHANDSHAKECOMPLETED)
 	clientHandshakeCompletedBytes = []byte(wire.ClientHandShakeCompleted)
 	handshakeSkipBytes            = []byte(wire.CLHandshakeSkip)
+	broadcastBytes                = []byte(wire.BROADCAST)
 )
 
 //************************************************************************
@@ -93,6 +94,155 @@ func (sc *websocketServerClient) getStatistics() (wire.ClientStatistic, error) {
 	stats.MessagesRead = atomic.LoadInt64(&sc.totalReadMsgs)
 	stats.MessagesWritten = atomic.LoadInt64(&sc.totalWriteMsgs)
 	return stats, nil
+}
+
+func (sc *websocketServerClient) broadcast(size int) (io.WriteCloser, error) {
+	if err := sc.isAlive(); err != nil {
+		return nil, err
+	}
+
+	sc.cu.Lock()
+	if sc.conn == nil {
+		sc.cu.Unlock()
+		return nil, wire.ErrAlreadyClosed
+	}
+	sc.cu.Unlock()
+
+	size += len(broadcastBytes)
+
+	w := llio.NewActionLengthWriter(func(size []byte, data []byte) error {
+		atomic.AddInt64(&sc.totalReadMsgs, 1)
+		atomic.AddInt64(&sc.totalWritten, int64(len(data)))
+
+		sc.network.cu.Lock()
+		defer sc.network.cu.Unlock()
+
+		for _, client := range sc.network.clients {
+			if err := client.writeDirectly(size, data); err != nil {
+				sc.logs.WithFields(history.Attrs{
+					"from-client": sc.id,
+					"to-client":   client.id,
+					"data":        string(data),
+					"size-data":   string(size),
+				}).Error(err, "failed to broadcast data")
+			}
+		}
+
+		return nil
+	}, wire.HeaderLength, size)
+
+	// Write broadcast header to the writer.
+	w.Write(broadcastBytes)
+
+	return w, nil
+}
+
+func (sc *websocketServerClient) distribute(skipSelf bool, skipCluster bool, flush bool, data []byte) error {
+	sc.network.cu.Lock()
+	defer sc.network.cu.Unlock()
+
+	for _, client := range sc.network.clients {
+		// If skipself is true, then skip this instance from
+		// write.
+		if skipSelf && (client.id == sc.id || client == sc) {
+			continue
+		}
+
+		// If skipCluster is true and we are a cluster, then skip this
+		// instance from write. We do this because attempting to wire
+		// to all cluster here, will calls a endless propagation, has
+		// other clusters will be sending back to the source. Its important
+		// to only ever ensure if a cluster is sent to then it's done by the
+		// source of the message, allowing other clusters to just distribute
+		// to their internal network client connections.
+		if skipCluster && client.isCluster() {
+			continue
+		}
+
+		if w, err := client.write(len(data)); err == nil {
+			if _, err := w.Write(data); err != nil {
+				sc.logs.WithFields(history.Attrs{
+					"from-client": sc.id,
+					"to-client":   client.id,
+					"data":        string(data),
+				}).Error(err, "failed to broadcast data")
+			}
+
+			if err := w.Close(); err != nil {
+				sc.logs.WithFields(history.Attrs{
+					"from-client": sc.id,
+					"to-client":   client.id,
+					"data":        string(data),
+				}).Error(err, "failed to close broadcast data writer")
+			}
+
+			// If flush is set, then flush all existing data
+			// into connection.
+			if flush {
+				if err := client.flush(); err != nil {
+					sc.logs.WithFields(history.Attrs{
+						"from-client": sc.id,
+						"to-client":   client.id,
+						"data":        string(data),
+					}).Error(err, "failed to flush broadcasted data")
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (sc *websocketServerClient) writeDirectly(d ...[]byte) error {
+	if len(d) == 0 {
+		return nil
+	}
+
+	if err := sc.isAlive(); err != nil {
+		return err
+	}
+
+	var conn net.Conn
+	sc.cu.Lock()
+	if sc.conn == nil {
+		sc.cu.Unlock()
+		return wire.ErrAlreadyClosed
+	}
+	conn = sc.conn
+	sc.cu.Unlock()
+
+	sc.bu.Lock()
+	defer sc.bu.Unlock()
+
+	if sc.wsWriter == nil {
+		return wire.ErrAlreadyClosed
+	}
+
+	for _, item := range d {
+		buffered := sc.wsWriter.Buffered()
+		atomic.AddInt64(&sc.totalFlushOut, int64(buffered))
+
+		// size of next write.
+		toWrite := buffered + len(item)
+
+		// add size header
+		toWrite += wire.HeaderLength
+
+		if toWrite >= sc.maxWrite {
+			conn.SetWriteDeadline(time.Now().Add(wire.MaxFlushDeadline))
+			if err := sc.wsWriter.Flush(); err != nil {
+				conn.SetWriteDeadline(time.Time{})
+				return err
+			}
+			conn.SetWriteDeadline(time.Time{})
+		}
+
+		if _, err := sc.wsWriter.Write(item); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (sc *websocketServerClient) write(size int) (io.WriteCloser, error) {
@@ -170,9 +320,10 @@ func (sc *websocketServerClient) clientRead() ([]byte, error) {
 		return nil, err
 	}
 
-	//if bytes.HasPrefix(indata, clientHandshakeCompletedBytes) {
-	//	return nil, wire.ErrNoDataYet
-	//}
+	// if its a broadcast, just trim the header out.
+	if bytes.HasPrefix(indata, broadcastBytes) {
+		return bytes.TrimPrefix(indata, broadcastBytes), nil
+	}
 
 	if bytes.Equal(indata, rescueBytes) {
 		return nil, wire.ErrNoDataYet
@@ -204,6 +355,23 @@ func (sc *websocketServerClient) serverRead() ([]byte, error) {
 	}
 
 	atomic.AddInt64(&sc.totalRead, int64(len(indata)))
+
+	// We are on the server, if we are not a cluster connection
+	// then return to reader else distribute to our own non-cluster
+	// connections.
+	if bytes.HasPrefix(indata, broadcastBytes) {
+		if !sc.isCluster() {
+			// Send to all network clients including clusters.
+			sc.distribute(true, false, true, indata)
+
+			return bytes.TrimPrefix(indata, broadcastBytes), nil
+		}
+
+		// Send to all network clients excluding clusters.
+		sc.distribute(true, true, true, indata)
+
+		return nil, wire.ErrNoDataYet
+	}
 
 	if bytes.HasPrefix(indata, clientHandshakeCompletedBytes) {
 		return nil, wire.ErrNoDataYet
@@ -1036,6 +1204,7 @@ func (n *WebsocketNetwork) addWSClient(conn net.Conn, hs ws.Handshake, policy wi
 	mclient.InfoFunc = client.getInfo
 	mclient.BufferedFunc = client.buffered
 	mclient.ReaderFunc = client.serverRead
+	mclient.BroadCastFunc = client.broadcast
 	mclient.HasPendingFunc = client.hasPending
 	mclient.LocalAddrFunc = client.getLocalAddr
 	mclient.StatisticFunc = client.getStatistics
@@ -1122,6 +1291,7 @@ func (n *WebsocketNetwork) getAllClient(cid string) ([]wire.Client, error) {
 		client.InfoFunc = conn.getInfo
 		client.WriteFunc = conn.write
 		client.FlushFunc = conn.flush
+		client.BroadCastFunc = conn.broadcast
 		client.BufferedFunc = conn.buffered
 		client.HasPendingFunc = conn.hasPending
 		client.StatisticFunc = conn.getStatistics

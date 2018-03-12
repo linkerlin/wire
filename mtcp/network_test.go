@@ -1,6 +1,7 @@
 package mtcp_test
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
@@ -108,6 +109,83 @@ func TestNetwork_Add(t *testing.T) {
 	}
 	tests.Passed("Should have matched cluster server to second mnet network")
 
+}
+
+func TestNetwork_Cluster_Broadcast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	netw, err := createNewNetwork(ctx, "localhost:4050", nil)
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully create network")
+	}
+	tests.Passed("Should have successfully create network")
+
+	netw2, err := createNewNetwork(ctx, "localhost:7050", nil)
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully created network")
+	}
+	tests.Passed("Should have successfully created network")
+
+	// Send net.Conn to be manage by another network manager for talks.
+	if err := netw2.AddCluster("localhost:4050"); err != nil {
+		tests.FailedWithError(err, "Should have successfully added net.Conn to network")
+	}
+	tests.Passed("Should have successfully added net.Conn to network")
+
+	client2, err := mtcp.Connect("localhost:4050")
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully connected to network")
+	}
+	tests.Passed("Should have successfully connected to network")
+
+	client, err := mtcp.Connect("localhost:7050")
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully connected to network")
+	}
+	tests.Passed("Should have successfully connected to network")
+
+	payload := []byte("pub")
+	cw, err := client.Broadcast(len(payload))
+	if err != nil {
+		tests.FailedWithError(err, "Should have successfully created new writer")
+	}
+	tests.Passed("Should have successfully created new writer")
+
+	cw.Write(payload)
+	if err := cw.Close(); err != nil {
+		tests.FailedWithError(err, "Should have successfully written payload to client")
+	}
+	tests.Passed("Should have successfully written payload to client")
+
+	if ferr := client.Flush(); ferr != nil {
+		tests.FailedWithError(ferr, "Should have successfully flush data to network")
+	}
+	tests.Passed("Should have successfully flush data to network")
+
+	var msg []byte
+	for {
+		msg, err = client2.Read()
+		if err != nil {
+			if err == wire.ErrNoDataYet {
+				err = nil
+				continue
+			}
+
+		}
+		break
+	}
+
+	client.Close()
+	client2.Close()
+
+	if !bytes.Equal(msg, payload) {
+		tests.Failed("Should have received broadcasted message")
+	}
+	tests.Passed("Should have received broadcasted message")
+
+	cancel()
+	netw.Wait()
+	netw2.Wait()
 }
 
 func TestNetwork_ClusterConnect(t *testing.T) {

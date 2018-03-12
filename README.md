@@ -12,6 +12,13 @@ Wire provides a tcp+websocket packages with blazing fast write speeds. It is a f
 go get -v github.com/wirekit/wire/...
 ```
 
+## Why
+
+- Simple API
+- Protocol-Agnostic Client
+- Data Broadcasting
+- MutliClustering Networks
+
 ## Protocols Implemented
 
 ### TCP

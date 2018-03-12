@@ -206,6 +206,7 @@ type Client struct {
 	RemoteAddrFunc   AddrFunc
 	ReaderFunc       ReaderFunc
 	WriteFunc        WriteFunc
+	BroadCastFunc    WriteFunc
 	InfoFunc         InfoFunc
 	CloseFunc        ClientFunc
 	LiveFunc         ClientFunc
@@ -349,6 +350,16 @@ func (c Client) Write(toWriteSize int) (io.WriteCloser, error) {
 		return c.WriteFunc(toWriteSize)
 	}
 	return nil, ErrWriteNotAllowed
+}
+
+// Broadcast returns a writer whoes data is distributed to all available
+// listeners or connections. It provides a single entry means to send
+// a data to all neighbour connections of the implementer.
+func (c Client) Broadcast(toWriteSize int) (io.WriteCloser, error) {
+	if c.BroadCastFunc != nil {
+		return c.BroadCastFunc(toWriteSize)
+	}
+	return nil, ErrNotSupported
 }
 
 // Flush sends all accumulated message within clients buffer into
