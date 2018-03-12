@@ -284,7 +284,7 @@ func (c Client) HasPending() bool {
 }
 
 // Buffered returns the percentage in decimal of (0.0...1.0) representing
-// possible used buffered space of giving buffered writer size.
+// possible used buffering space of available to connection.
 func (c Client) Buffered() (float64, error) {
 	if c.BufferedFunc == nil {
 		return 0, ErrNotSupported
