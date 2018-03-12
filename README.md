@@ -36,6 +36,7 @@ Wire provides the [msocks](./msocks) package which implements a lightweight webs
 
 Msocks like all Wire packages are a foundation, in that they lay the necessary foundation to transfer at blazing speed without being too opinionated on how you build on top.
 
+See [MSOCKS](./msocks) for more.
 
 ## Contributions
 
